@@ -1,14 +1,23 @@
 """
-FastAPI app: session management and /turn endpoint.
-Uses single SessionManager; run_turn from cli.main.
+FastAPI server for the general-purpose agent (same stack as main.py / cli.main).
+
+Uses: SessionManager, run_turn from cli.main, storage backend, memory/skills stores,
+file-access and executor-approval callbacks. Serves web chat UI at /.
+Supports SSE streaming via POST /sessions/{session_id}/turn/stream.
 """
 
+import asyncio
+import json
 import logging
+import queue
+import threading
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from config import MODEL, setup_agent_logging
@@ -21,10 +30,12 @@ from skills_core import SKILLS
 
 logger = logging.getLogger("agent")
 
+_STATIC_DIR = Path(__file__).resolve().parent / "static"
+
 # Singleton SessionManager (created on startup)
 session_mgr: Optional[SessionManager] = None
 
-# Request-scoped pending approvals for Executor (tool_name, tool_args, tool_call_id)
+# Request-scoped pending approvals (tool_name, tool_args) when agent requests tool approval
 pending_approvals_var: ContextVar[List[Dict[str, Any]]] = ContextVar(
     "pending_approvals", default=[]
 )
@@ -45,7 +56,7 @@ def _server_approval_callback(tool_name: str, tool_args: dict) -> bool:
 
 
 def _init_server() -> None:
-    """Initialize storage backend, SessionManager, memory/skills stores, and approval callback."""
+    """Initialize same agent stack as main.py: storage, SessionManager, memory/skills, callbacks."""
     global session_mgr
     if session_mgr is not None:
         return
@@ -95,7 +106,7 @@ class SessionSummary(BaseModel):
 
 app = FastAPI(
     title="Agent API",
-    description="HTTP API for the general-purpose agent (sessions + turn).",
+    description="HTTP API for the general-purpose agent (sessions + turn). Same logic as python main.py.",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -149,7 +160,6 @@ def turn(
     if not body.message or not body.message.strip():
         raise HTTPException(status_code=400, detail="message must be non-empty")
 
-    # Request-scoped pending approvals (reset for this request)
     token = pending_approvals_var.set([])
 
     try:
@@ -181,3 +191,106 @@ def turn(
     finally:
         pending_approvals_var.reset(token)
 
+
+# --- SSE streaming ---
+
+def _sse_event(data: dict) -> str:
+    return f"data: {json.dumps(data)}\n\n"
+
+
+async def _stream_turn_events(
+    q: queue.Queue,
+) -> AsyncGenerator[str, None]:
+    """Consume queue from worker thread and yield SSE event strings."""
+    loop = asyncio.get_event_loop()
+    while True:
+        try:
+            item = await loop.run_in_executor(None, q.get)
+        except Exception:
+            break
+        if item is None:
+            break
+        kind = item[0]
+        if kind == "delta":
+            yield _sse_event({"type": "delta", "delta": item[1]})
+        elif kind == "done":
+            yield _sse_event({
+                "type": "done",
+                "reply": item[1] or "",
+                "pending_approvals": item[2],
+            })
+            break
+        elif kind == "error":
+            yield _sse_event({"type": "error", "detail": item[1]})
+            break
+
+
+@app.post("/sessions/{session_id}/turn/stream")
+def turn_stream(
+    session_id: str,
+    body: TurnRequest,
+    create_if_missing: bool = Query(False, description="Create session if not found"),
+) -> StreamingResponse:
+    """
+    Same as POST /sessions/{session_id}/turn but streams assistant reply via SSE.
+    Events: data: {"type":"delta","delta":"chunk"} for each token; then
+    data: {"type":"done","reply":"...","pending_approvals":[...]}.
+    """
+    mgr = get_session_mgr()
+    session = mgr.restore_session(session_id)
+    created = False
+    if session is None:
+        if create_if_missing:
+            session = mgr.create_session(context={"started": True})
+            created = True
+        else:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+    if not body.message or not body.message.strip():
+        raise HTTPException(status_code=400, detail="message must be non-empty")
+
+    message = body.message.strip()
+    q: queue.Queue = queue.Queue()
+
+    def stream_callback(chunk: str) -> None:
+        q.put(("delta", chunk))
+
+    def worker() -> None:
+        pending_approvals_var.set([])
+        try:
+            from cli.main import run_turn
+
+            lifecycle = LifecycleManager()
+            saved_summary = session.context.get("conversation_summary")
+            if saved_summary:
+                lifecycle.set_conversation_summary(saved_summary)
+            budget = get_budget(model=MODEL)
+            history = list(session.history)
+
+            history, last_assistant_text = run_turn(
+                message,
+                history,
+                mgr,
+                lifecycle,
+                budget,
+                stream_callback=stream_callback,
+            )
+            pending = list(pending_approvals_var.get())
+            q.put(("done", last_assistant_text or "", pending))
+        except Exception as e:
+            logger.exception("turn_stream failed: %s", e)
+            q.put(("error", str(e)[:500]))
+        finally:
+            q.put(None)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    return StreamingResponse(
+        _stream_turn_events(q),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

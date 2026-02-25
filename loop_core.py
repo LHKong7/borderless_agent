@@ -9,7 +9,7 @@ import json
 import logging
 import time
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from config import WORKDIR, MODEL, client, stream_enabled
 from skills_core import SKILLS
@@ -75,6 +75,26 @@ def _build_system(retrieved_memories: Optional[List[str]] = None) -> str:
     return base
 
 
+def _messages_to_openai(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Convert history to OpenAI API format: expand user messages with tool_result list into role 'tool' messages."""
+    out: List[Dict[str, Any]] = []
+    for m in messages:
+        role = m.get("role")
+        content = m.get("content")
+        if role == "user" and isinstance(content, list):
+            # Legacy: list of {type: "tool_result", tool_call_id, content} -> one "tool" message per item
+            if content and isinstance(content[0], dict) and content[0].get("type") == "tool_result":
+                for r in content:
+                    out.append({
+                        "role": "tool",
+                        "tool_call_id": r.get("tool_call_id", ""),
+                        "content": r.get("content", ""),
+                    })
+                continue
+        out.append(dict(m))
+    return out
+
+
 def _last_assistant_text(messages: List[Dict[str, Any]]) -> str:
     """Extract final assistant text from last message (for consolidation)."""
     for i in range(len(messages) - 1, -1, -1):
@@ -104,10 +124,15 @@ def _usage_dict(response: Any) -> Optional[Dict[str, Any]]:
     }
 
 
-def _stream_to_message(stream: Any, budget: Optional[Dict[str, int]], sid_tag: str):
+def _stream_to_message(
+    stream: Any,
+    budget: Optional[Dict[str, int]],
+    sid_tag: str,
+    on_content_delta: Optional[Callable[[str], None]] = None,
+):
     """
-    Consume OpenAI stream: print content deltas, accumulate content and tool_calls.
-    Returns (content: str, tool_calls: list, usage: dict or None).
+    Consume OpenAI stream: optionally call on_content_delta for each content chunk,
+    accumulate content and tool_calls. Returns (content: str, tool_calls: list, usage: dict or None).
     """
     content_parts: List[str] = []
     tool_calls_accum: List[Dict[str, Any]] = []
@@ -126,7 +151,10 @@ def _stream_to_message(stream: Any, budget: Optional[Dict[str, int]], sid_tag: s
         part = getattr(delta, "content", None)
         if part:
             content_parts.append(part)
-            print(part, end="", flush=True)
+            if on_content_delta is not None:
+                on_content_delta(part)
+            else:
+                print(part, end="", flush=True)
         # Tool calls (streamed by index; merge by index)
         tc_deltas = getattr(delta, "tool_calls", None) or []
         for tc in tc_deltas:
@@ -150,7 +178,7 @@ def _stream_to_message(stream: Any, budget: Optional[Dict[str, int]], sid_tag: s
             usage = _usage_dict(chunk)
 
     content = "".join(content_parts)
-    if content:
+    if content and on_content_delta is None:
         print(flush=True)  # newline after streamed content
     tool_calls_out: List[Any] = []
     for acc in tool_calls_accum:
@@ -169,6 +197,7 @@ def agent_loop(
     system_override: Optional[str] = None,
     budget: Optional[Dict[str, int]] = None,
     session_id: str = "",
+    on_content_delta: Optional[Callable[[str], None]] = None,
 ) -> Tuple[List[Dict[str, Any]], str, bool]:
     """
     Main agent loop with skills support (OpenAI chat completions + tool calls).
@@ -182,14 +211,15 @@ def agent_loop(
     total_tool_count = 0
     system = system_override if system_override else _build_system(retrieved_memories)
     openai_tools = _tools_to_openai(ALL_TOOLS)
-    api_messages: List[Dict[str, Any]] = [{"role": "system", "content": system}] + list(messages)
+    api_messages: List[Dict[str, Any]] = [{"role": "system", "content": system}] + _messages_to_openai(messages)
 
     sid_tag = session_id[:8] if session_id else "-"
     slog.debug("agent_loop start session=%s rounds_limit=%s", sid_tag, MAX_TOOL_ROUNDS)
 
     while True:
         req_start = time.monotonic()
-        if stream_enabled():
+        use_stream = stream_enabled() or (on_content_delta is not None)
+        if use_stream:
             stream = client.chat.completions.create(
                 model=MODEL,
                 messages=api_messages,
@@ -200,7 +230,9 @@ def agent_loop(
             )
             req_ms = int((time.monotonic() - req_start) * 1000)
             slog.debug("api_call session=%s duration_ms=%s (stream)", sid_tag, req_ms)
-            content, tool_calls, usage = _stream_to_message(stream, budget, sid_tag)
+            content, tool_calls, usage = _stream_to_message(
+                stream, budget, sid_tag, on_content_delta=on_content_delta
+            )
             req_ms = int((time.monotonic() - req_start) * 1000)
             slog.debug("api_call session=%s duration_ms=%s", sid_tag, req_ms)
             # Synthesize message for rest of loop
@@ -286,14 +318,28 @@ def agent_loop(
 
             results.append({"type": "tool_result", "tool_call_id": tc.id, "content": output})
 
-        # Append assistant message (with tool_calls) and user message (tool results)
+        # Append assistant message (with tool_calls) and tool result messages (OpenAI format: role "tool")
         api_messages.append({
             "role": "assistant",
             "content": msg.content or "",
             "tool_calls": assistant_tool_calls,
         })
-        api_messages.append({"role": "user", "content": results})
-        # Keep local messages in sync for memory (assistant content + tool round as single turn)
-        messages.append({"role": "assistant", "content": msg.content or ""})
-        messages.append({"role": "user", "content": results})
+        for r in results:
+            api_messages.append({
+                "role": "tool",
+                "tool_call_id": r["tool_call_id"],
+                "content": r["content"],
+            })
+        # Keep local messages in sync for memory (same format so history is API-compatible)
+        messages.append({
+            "role": "assistant",
+            "content": msg.content or "",
+            "tool_calls": assistant_tool_calls,
+        })
+        for r in results:
+            messages.append({
+                "role": "tool",
+                "tool_call_id": r["tool_call_id"],
+                "content": r["content"],
+            })
 

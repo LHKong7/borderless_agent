@@ -15,7 +15,7 @@ Delegates to project root modules:
 
 import logging
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from config import WORKDIR, MODEL, setup_agent_logging
 from session_core import SessionManager
@@ -105,6 +105,7 @@ def run_turn(
     session_mgr: SessionManager,
     lifecycle: LifecycleManager,
     budget: Dict[str, int],
+    stream_callback: Optional[Any] = None,
 ) -> Tuple[List[Dict[str, Any]], str]:
     """
     Execute a single conversation turn. Callable from REPL, server, or scripts.
@@ -185,6 +186,7 @@ def run_turn(
                 system_override=system_override,
                 budget=budget,
                 session_id=session_id,
+                on_content_delta=stream_callback,
             )
         consolidate_turn(user_input, last_assistant_text or "")
 

@@ -542,7 +542,12 @@ Complete the task and return a clear, concise summary."""
             "content": msg.content or "",
             "tool_calls": assistant_tool_calls,
         })
-        api_messages.append({"role": "user", "content": results})
+        for r in results:
+            api_messages.append({
+                "role": "tool",
+                "tool_call_id": r["tool_call_id"],
+                "content": r["content"],
+            })
 
     elapsed = time.time() - start
     logger.info("  [%s] %s - done (%s tools, %.1fs)", agent_type, description, tool_count, elapsed)
