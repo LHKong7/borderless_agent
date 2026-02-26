@@ -44,10 +44,20 @@ API_TIMEOUT: float = float(os.getenv("AGENT_API_TIMEOUT", "120"))
 def stream_enabled() -> bool:
     return os.environ.get("AGENT_STREAM", "").strip().lower() in ("1", "true", "yes")
 
-# OpenAI client and default model
+# OpenAI client and default model (kept for backward compatibility during migration)
 _client_kw: dict = {"timeout": API_TIMEOUT}
 if os.getenv("OPENAI_BASE_URL"):
     _client_kw["base_url"] = os.getenv("OPENAI_BASE_URL")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", "sk-placeholder"), **_client_kw)
 MODEL = os.getenv("MODEL_ID", "gpt-4o")
+
+# Default LLM provider for library-style usage; used when llm is not injected
+from llm_protocol import OpenAIProvider
+
+default_llm_provider: OpenAIProvider = OpenAIProvider(
+    api_key=os.getenv("OPENAI_API_KEY", "sk-placeholder"),
+    model=MODEL,
+    base_url=os.getenv("OPENAI_BASE_URL") or None,
+    timeout=API_TIMEOUT,
+)
 

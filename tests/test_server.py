@@ -1,8 +1,8 @@
-"""Server API tests (TestClient + mocked OpenAI)."""
+"""Server API tests (TestClient + mocked LLM provider)."""
 
 import sys
 from pathlib import Path
-from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -10,18 +10,16 @@ import os
 os.environ.setdefault("OPENAI_API_KEY", "sk-test")
 
 from fastapi.testclient import TestClient
+from llm_protocol import LLMResponse
 
 
-def _make_mock_response(text: str = "Server reply"):
-    msg = SimpleNamespace(content=text, tool_calls=None, role="assistant")
-    choice = SimpleNamespace(message=msg, finish_reason="stop")
-    usage = SimpleNamespace(
-        input_tokens=10,
-        output_tokens=5,
-        cache_creation_input_tokens=0,
-        cache_read_input_tokens=0,
+def _make_mock_llm_response(text: str = "Server reply") -> LLMResponse:
+    return LLMResponse(
+        content=text,
+        tool_calls=[],
+        usage={"input_tokens": 10, "output_tokens": 5},
+        model="test",
     )
-    return SimpleNamespace(choices=[choice], usage=usage)
 
 
 def test_create_session():
@@ -72,15 +70,15 @@ def test_turn_create_if_missing():
 
 
 def test_turn_full_flow():
-    from unittest.mock import patch
     from server.app import app
     client = TestClient(app)
     r = client.post("/sessions")
     assert r.status_code == 201
     sid = r.json()["session_id"]
-    mock_resp = _make_mock_response("Mocked assistant reply.")
-    with patch("loop_core.client") as mock_client:
-        mock_client.chat.completions.create.return_value = mock_resp
+    mock_llm = MagicMock()
+    mock_llm.supports_streaming = False
+    mock_llm.chat.return_value = _make_mock_llm_response("Mocked assistant reply.")
+    with patch("loop_core.default_llm_provider", mock_llm):
         r2 = client.post(f"/sessions/{sid}/turn", json={"message": "hi"})
     assert r2.status_code == 200
     body = r2.json()

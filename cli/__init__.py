@@ -6,6 +6,6 @@ Run from project root:
   python main.py   (root main.py delegates here)
 """
 
-from cli.main import main, run_turn
+from cli.main import Agent, main, run_turn
 
-__all__ = ["main", "run_turn"]
+__all__ = ["Agent", "main", "run_turn"]

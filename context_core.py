@@ -452,9 +452,11 @@ def _summarizer_enabled() -> bool:
     return os.environ.get("AGENT_SUMMARIZER", "").strip().lower() in ("1", "true", "yes")
 
 
-def _model_summarize(rounds: List[Dict[str, Any]]) -> str:
+def _model_summarize(rounds: List[Dict[str, Any]], llm: Optional[Any] = None) -> str:
     """Call the configured LLM to produce a concise summary of conversation rounds."""
-    from config import client, MODEL
+    if llm is None:
+        from config import default_llm_provider
+        llm = default_llm_provider
 
     text_parts: List[str] = []
     for m in rounds[:30]:
@@ -467,15 +469,15 @@ def _model_summarize(rounds: List[Dict[str, Any]]) -> str:
     transcript = "\n".join(text_parts)[:4000]
 
     try:
-        resp = client.chat.completions.create(
-            model=MODEL,
+        resp = llm.chat(
             messages=[
                 {"role": "system", "content": "Summarize the following conversation in 2-3 sentences. Focus on key topics, decisions, and outcomes. Be concise."},
                 {"role": "user", "content": transcript},
             ],
             max_tokens=300,
+            stream=False,
         )
-        return (resp.choices[0].message.content or "").strip()
+        return (resp.content or "").strip()
     except Exception:  # noqa: BLE001
         return ""
 

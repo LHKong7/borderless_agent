@@ -13,9 +13,11 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional
 
-from config import WORKDIR, MODEL, client
+from config import WORKDIR, default_llm_provider
+from llm_protocol import LLMProvider, LLMResponse, ToolCall
 
 # Mid-term memory: optional callback when a file is read (session recent_files tracking)
 _file_access_callback: Optional[Callable[[str], None]] = None
@@ -456,8 +458,29 @@ You have now loaded this skill. Use the knowledge above to complete the user's t
 Do NOT call the Skill tool again for this task; respond with your full answer in natural language."""
 
 
-def run_task(description: str, prompt: str, agent_type: str) -> str:
-    """Execute a subagent task (OpenAI chat.completions + tool calls)."""
+def _tool_calls_to_msg_shape(tool_calls: List[ToolCall]) -> List[Any]:
+    """Convert List[ToolCall] to message shape used by run_task loop (id, function.name, function.arguments string)."""
+    return [
+        SimpleNamespace(
+            id=tc.id,
+            function=SimpleNamespace(
+                name=tc.name,
+                arguments=json.dumps(tc.arguments) if tc.arguments else "{}",
+            ),
+        )
+        for tc in tool_calls
+    ]
+
+
+def run_task(
+    description: str,
+    prompt: str,
+    agent_type: str,
+    llm: Optional[LLMProvider] = None,
+) -> str:
+    """Execute a subagent task (LLM provider + tool calls)."""
+    if llm is None:
+        llm = default_llm_provider
     if agent_type not in AGENT_TYPES:
         return f"Error: Unknown agent type '{agent_type}'"
 
@@ -482,25 +505,23 @@ Complete the task and return a clear, concise summary."""
     last_text = "(subagent returned no text)"
 
     while True:
-        response = client.chat.completions.create(
-            model=MODEL,
+        response: LLMResponse = llm.chat(
             messages=api_messages,
             tools=openai_tools,
-            tool_choice="auto",
             max_tokens=8000,
+            stream=False,
         )
-        msg = response.choices[0].message
-        tool_calls = list(msg.tool_calls) if msg.tool_calls else []
+        tool_calls = _tool_calls_to_msg_shape(response.tool_calls) if response.tool_calls else []
 
         # Subagent token usage
-        u = getattr(response, "usage", None)
-        if u and (getattr(u, "input_tokens", 0) or getattr(u, "output_tokens", 0)):
-            inp = getattr(u, "input_tokens", 0) or 0
-            out = getattr(u, "output_tokens", 0) or 0
+        usage = response.usage or {}
+        if usage and (usage.get("input_tokens") or usage.get("output_tokens")):
+            inp = usage.get("input_tokens", 0) or 0
+            out = usage.get("output_tokens", 0) or 0
             logger.info("  [%s] Tokens: in %s out %s", agent_type, inp, out)
 
-        if msg.content:
-            last_text = (msg.content or "").strip()
+        if response.content:
+            last_text = (response.content or "").strip()
 
         if not tool_calls:
             break
@@ -539,7 +560,7 @@ Complete the task and return a clear, concise summary."""
 
         api_messages.append({
             "role": "assistant",
-            "content": msg.content or "",
+            "content": response.content or "",
             "tool_calls": assistant_tool_calls,
         })
         for r in results:

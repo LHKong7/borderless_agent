@@ -1,8 +1,8 @@
 """
-loop_core.py - Main agent loop and system prompt (OpenAI SDK).
+loop_core.py - Main agent loop and system prompt (LLM provider abstraction).
 
 Integrates long-term memory: optional retrieved_memories injected into system prompt,
-and returns last assistant text for consolidation.
+and returns last assistant text for consolidation. Uses LLMProvider for chat.
 """
 
 import json
@@ -11,7 +11,8 @@ import time
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from config import WORKDIR, MODEL, client, stream_enabled
+from config import WORKDIR, stream_enabled, default_llm_provider
+from llm_protocol import LLMProvider, LLMResponse, ToolCall
 from skills_core import SKILLS
 from agents_core import get_agent_descriptions
 from tools_core import ALL_TOOLS, MAX_TOOL_ROUNDS, execute_tool
@@ -112,7 +113,7 @@ def _last_assistant_text(messages: List[Dict[str, Any]]) -> str:
 
 
 def _usage_dict(response: Any) -> Optional[Dict[str, Any]]:
-    """Build usage dict from OpenAI response for compute_usage_stats."""
+    """Build usage dict from OpenAI response for compute_usage_stats (legacy / fallback)."""
     u = getattr(response, "usage", None)
     if u is None:
         return None
@@ -124,71 +125,15 @@ def _usage_dict(response: Any) -> Optional[Dict[str, Any]]:
     }
 
 
-def _stream_to_message(
-    stream: Any,
-    budget: Optional[Dict[str, int]],
-    sid_tag: str,
-    on_content_delta: Optional[Callable[[str], None]] = None,
-):
-    """
-    Consume OpenAI stream: optionally call on_content_delta for each content chunk,
-    accumulate content and tool_calls. Returns (content: str, tool_calls: list, usage: dict or None).
-    """
-    content_parts: List[str] = []
-    tool_calls_accum: List[Dict[str, Any]] = []
-    usage = None
-
-    for chunk in stream:
-        if not getattr(chunk, "choices", None) or len(chunk.choices) == 0:
-            if getattr(chunk, "usage", None):
-                usage = _usage_dict(chunk)
-            continue
-        choice = chunk.choices[0]
-        delta = getattr(choice, "delta", None)
-        if delta is None:
-            continue
-        # Content
-        part = getattr(delta, "content", None)
-        if part:
-            content_parts.append(part)
-            if on_content_delta is not None:
-                on_content_delta(part)
-            else:
-                print(part, end="", flush=True)
-        # Tool calls (streamed by index; merge by index)
-        tc_deltas = getattr(delta, "tool_calls", None) or []
-        for tc in tc_deltas:
-            idx = getattr(tc, "index", None)
-            if idx is None:
-                continue
-            while len(tool_calls_accum) <= idx:
-                tool_calls_accum.append({"id": "", "name": "", "arguments": ""})
-            acc = tool_calls_accum[idx]
-            if getattr(tc, "id", None):
-                acc["id"] = tc.id
-            fn = getattr(tc, "function", None)
-            if fn is not None:
-                n = getattr(fn, "name", None) or (fn.get("name") if isinstance(fn, dict) else None)
-                if n:
-                    acc["name"] = n
-                a = getattr(fn, "arguments", None) or (fn.get("arguments") if isinstance(fn, dict) else None)
-                if a:
-                    acc["arguments"] = acc.get("arguments", "") + a
-        if getattr(chunk, "usage", None):
-            usage = _usage_dict(chunk)
-
-    content = "".join(content_parts)
-    if content and on_content_delta is None:
-        print(flush=True)  # newline after streamed content
-    tool_calls_out: List[Any] = []
-    for acc in tool_calls_accum:
-        if acc.get("id") or acc.get("name") or acc.get("arguments"):
-            tc = SimpleNamespace(
-                id=acc.get("id", ""),
-                function=SimpleNamespace(name=acc.get("name", ""), arguments=acc.get("arguments", "")),
-            )
-            tool_calls_out.append(tc)
-    return content, tool_calls_out, usage
+def _tool_calls_to_msg_shape(tool_calls: List[ToolCall]) -> List[Any]:
+    """Convert List[ToolCall] to message shape used by loop (id, function.name, function.arguments string)."""
+    return [
+        SimpleNamespace(
+            id=tc.id,
+            function=SimpleNamespace(name=tc.name, arguments=json.dumps(tc.arguments) if tc.arguments else "{}"),
+        )
+        for tc in tool_calls
+    ]
 
 
 def agent_loop(
@@ -198,13 +143,16 @@ def agent_loop(
     budget: Optional[Dict[str, int]] = None,
     session_id: str = "",
     on_content_delta: Optional[Callable[[str], None]] = None,
+    llm: Optional[LLMProvider] = None,
 ) -> Tuple[List[Dict[str, Any]], str, bool]:
     """
-    Main agent loop with skills support (OpenAI chat completions + tool calls).
+    Main agent loop with skills support (LLM provider + tool calls).
 
     Includes a safety limit on tool rounds to avoid infinite loops.
     Returns (updated messages, last_assistant_text, had_tool_calls).
     """
+    if llm is None:
+        llm = default_llm_provider
     loop_start = time.monotonic()
     tool_rounds = 0
     had_tool_calls = False
@@ -218,38 +166,46 @@ def agent_loop(
 
     while True:
         req_start = time.monotonic()
-        use_stream = stream_enabled() or (on_content_delta is not None)
+        use_stream = (stream_enabled() or on_content_delta is not None) and getattr(llm, "supports_streaming", False)
         if use_stream:
-            stream = client.chat.completions.create(
-                model=MODEL,
+            stream = llm.chat(
                 messages=api_messages,
                 tools=openai_tools,
-                tool_choice="auto",
                 max_tokens=8000,
                 stream=True,
             )
             req_ms = int((time.monotonic() - req_start) * 1000)
             slog.debug("api_call session=%s duration_ms=%s (stream)", sid_tag, req_ms)
-            content, tool_calls, usage = _stream_to_message(
-                stream, budget, sid_tag, on_content_delta=on_content_delta
+            last_response: Optional[LLMResponse] = None
+            for r in stream:
+                if r.content and on_content_delta is not None:
+                    on_content_delta(r.content)
+                elif r.content and stream_enabled():
+                    print(r.content, end="", flush=True)
+                last_response = r
+            if last_response and last_response.content and stream_enabled() and on_content_delta is None:
+                print(flush=True)
+            content = (last_response.content or "") if last_response else ""
+            tool_calls = (last_response.tool_calls or []) if last_response else []
+            usage = (last_response.usage or {}) if last_response else {}
+            msg = SimpleNamespace(
+                content=content,
+                tool_calls=_tool_calls_to_msg_shape(tool_calls) if tool_calls else None,
             )
-            req_ms = int((time.monotonic() - req_start) * 1000)
-            slog.debug("api_call session=%s duration_ms=%s", sid_tag, req_ms)
-            # Synthesize message for rest of loop
-            msg = SimpleNamespace(content=content, tool_calls=tool_calls if tool_calls else None)
         else:
-            response = client.chat.completions.create(
-                model=MODEL,
+            response: LLMResponse = llm.chat(
                 messages=api_messages,
                 tools=openai_tools,
-                tool_choice="auto",
                 max_tokens=8000,
+                stream=False,
             )
             req_ms = int((time.monotonic() - req_start) * 1000)
             slog.debug("api_call session=%s duration_ms=%s", sid_tag, req_ms)
-            msg = response.choices[0].message
-            tool_calls = list(msg.tool_calls) if msg.tool_calls else []
-            usage = _usage_dict(response)
+            msg = SimpleNamespace(
+                content=response.content or "",
+                tool_calls=_tool_calls_to_msg_shape(response.tool_calls) if response.tool_calls else None,
+            )
+            usage = response.usage or {}
 
         # Token usage visibility (streaming may not have usage in all backends)
         if usage and (usage.get("input_tokens") or usage.get("output_tokens")):

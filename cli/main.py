@@ -17,6 +17,8 @@ import logging
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from pathlib import Path
+
 from config import WORKDIR, MODEL, setup_agent_logging
 from session_core import SessionManager
 from skills_core import SKILLS
@@ -25,6 +27,7 @@ from memory_core import set_memory_store
 from agents_core import AGENT_TYPES
 from tools_core import LOADED_SKILLS, set_file_access_callback
 from loop_core import agent_loop, get_base_system
+from llm_protocol import LLMProvider
 from memory_core import (
     retrieve,
     consolidate_turn,
@@ -106,6 +109,7 @@ def run_turn(
     lifecycle: LifecycleManager,
     budget: Dict[str, int],
     stream_callback: Optional[Any] = None,
+    llm: Optional[LLMProvider] = None,
 ) -> Tuple[List[Dict[str, Any]], str]:
     """
     Execute a single conversation turn. Callable from REPL, server, or scripts.
@@ -187,6 +191,7 @@ def run_turn(
                 budget=budget,
                 session_id=session_id,
                 on_content_delta=stream_callback,
+                llm=llm,
             )
         consolidate_turn(user_input, last_assistant_text or "")
 
@@ -206,6 +211,37 @@ def run_turn(
     slog.debug("run_turn end session=%s duration_ms=%s history_len=%s", sid_tag, turn_ms, len(history))
 
     return history, last_assistant_text
+
+
+class Agent:
+    """
+    Library-style agent that holds an LLM provider and delegates run_turn.
+    Usage: agent = Agent(llm=OpenAIProvider(...)); agent.run_turn(...)
+    """
+
+    def __init__(self, llm: LLMProvider, workdir: Optional[Path] = None) -> None:
+        self.llm = llm
+        self.workdir = workdir
+
+    def run_turn(
+        self,
+        user_input: str,
+        history: List[Dict[str, Any]],
+        session_mgr: SessionManager,
+        lifecycle: LifecycleManager,
+        budget: Dict[str, int],
+        **kwargs: Any,
+    ) -> Tuple[List[Dict[str, Any]], str]:
+        """Execute a single turn with this agent's LLM provider."""
+        return run_turn(
+            user_input,
+            history,
+            session_mgr,
+            lifecycle,
+            budget,
+            llm=self.llm,
+            **kwargs,
+        )
 
 
 def _sync_session(
