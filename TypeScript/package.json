@@ -1,14 +1,36 @@
 {
   "name": "agentic-system",
-  "version": "1.0.0",
-  "description": "General-purpose agentic system - TypeScript port",
-  "main": "dist/main.js",
+  "version": "0.0.1",
+  "description": "Portable agentic AI framework — build agents with custom tools, skills, and system prompts",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc",
     "start": "node dist/main.js",
     "dev": "npx ts-node src/main.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
   },
+  "keywords": [
+    "agent",
+    "ai",
+    "llm",
+    "openai",
+    "tools",
+    "skills"
+  ],
+  "license": "MIT",
   "dependencies": {
     "openai": "^4.50.0",
     "dotenv": "^16.4.0",

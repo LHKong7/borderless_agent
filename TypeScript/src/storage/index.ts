@@ -44,7 +44,7 @@ export function getStorageBackend(options?: {
             contextDir: options?.contextDir,
         });
     }
-    return _defaultBackend;
+    return _defaultBackend!;
 }
 
 function ensureBackend(): StorageBackend {

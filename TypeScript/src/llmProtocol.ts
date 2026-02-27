@@ -30,6 +30,7 @@ export interface ChatMessage {
     content?: string | any[];
     tool_calls?: any[];
     tool_call_id?: string;
+    [key: string]: any;
 }
 
 // ---------------------------------------------------------------------------
@@ -41,7 +42,7 @@ export interface LLMProvider {
     readonly supportsStreaming: boolean;
 
     chat(
-        messages: ChatMessage[],
+        messages: ChatMessage[] | Record<string, any>[],
         options?: {
             tools?: any[];
             temperature?: number;
@@ -129,7 +130,7 @@ export class OpenAIProvider implements LLMProvider {
     }
 
     chat(
-        messages: ChatMessage[],
+        messages: ChatMessage[] | Record<string, any>[],
         options?: {
             tools?: any[];
             temperature?: number;
