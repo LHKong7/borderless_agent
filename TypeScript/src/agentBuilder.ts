@@ -21,6 +21,7 @@ import {
     LLMConfig,
     StorageConfig,
 } from './types';
+import type { SandboxConfig } from './sandbox';
 import { AgentInstance } from './agentInstance';
 
 export class AgentBuilder {
@@ -133,6 +134,14 @@ export class AgentBuilder {
         cb: (toolName: string, args: Record<string, any>) => Promise<boolean> | boolean,
     ): this {
         this._config.approvalCallback = cb;
+        return this;
+    }
+
+    // ---- Sandbox ----
+
+    /** Configure the execution sandbox (file guards, command filtering, resource limits). */
+    setSandbox(config: SandboxConfig): this {
+        this._config.sandbox = config;
         return this;
     }
 

@@ -52,3 +52,6 @@ skills/
 
 # code agent MAYBE NEEDED
 .cursor
+
+
+node_modules

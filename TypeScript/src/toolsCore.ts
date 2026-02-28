@@ -1,9 +1,11 @@
 /**
- * toolsCore.ts - Tool definitions and implementations (bash, file ops, skills, tasks).
+ * toolsCore.ts - Tool definitions and implementations (bash, file ops, skills, tasks, web).
  *
  * Read: pagination (offset/limit) and chunked read for large files.
  * Grep: context lines (before/after) around matches.
  * Write: atomic write + backup before overwrite.
+ * WebSearch: search the web via API.
+ * WebFetch: fetch URL content, strip to text.
  */
 
 import { execSync } from 'child_process';
@@ -166,6 +168,47 @@ export const BASE_TOOLS: Record<string, any>[] = [
                 limit: { type: 'integer' },
             },
             required: [],
+        },
+    },
+    {
+        name: 'WebSearch',
+        description:
+            'Search the web for current information beyond the model\'s knowledge cutoff. Returns formatted search results with titles, URLs, and snippets.',
+        input_schema: {
+            type: 'object',
+            properties: {
+                query: { type: 'string', description: 'The search query to use' },
+                allowed_domains: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description:
+                        'Only include results from these domains (e.g. ["github.com"])',
+                },
+                blocked_domains: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description:
+                        'Never include results from these domains',
+                },
+            },
+            required: ['query'],
+        },
+    },
+    {
+        name: 'WebFetch',
+        description:
+            'Fetch content from a specific URL and return it as plain text. The content is stripped of HTML tags and trimmed to a safe size.',
+        input_schema: {
+            type: 'object',
+            properties: {
+                url: { type: 'string', description: 'The URL to fetch' },
+                prompt: {
+                    type: 'string',
+                    description:
+                        'Instructions for how to process the fetched content (e.g. "Extract API endpoints")',
+                },
+            },
+            required: ['url', 'prompt'],
         },
     },
 ];
@@ -627,6 +670,9 @@ export function executeTool(name: string, args: Record<string, any>): string {
             return runSearchKnowledgeBase(args.query ?? '');
         case 'read_email':
             return runReadEmail(args.folder ?? 'Inbox', args.limit ?? 10);
+        case 'WebSearch':
+        case 'WebFetch':
+            return '(Web tools require async execution — use executeToolAsync)';
         case 'Task':
             // runTask is async; return a placeholder — callers should use executeToolAsync
             return '(Task tool requires async execution)';
@@ -644,5 +690,205 @@ export async function executeToolAsync(
     if (name === 'Task') {
         return runTask(args.description, args.prompt, args.agent_type);
     }
+    if (name === 'WebSearch') {
+        return runWebSearch(
+            args.query ?? '',
+            args.allowed_domains,
+            args.blocked_domains,
+        );
+    }
+    if (name === 'WebFetch') {
+        return runWebFetch(args.url ?? '', args.prompt ?? '');
+    }
     return executeTool(name, args);
+}
+
+// ---------------------------------------------------------------------------
+// Web tool implementations
+// ---------------------------------------------------------------------------
+
+const WEB_TIMEOUT_MS = 30_000;
+const WEB_MAX_CHARS = 50_000;
+
+/**
+ * Strip HTML tags, decode entities, and normalise whitespace.
+ */
+function htmlToText(html: string): string {
+    let text = html;
+    // Remove script/style blocks
+    text = text.replace(/<script[\s\S]*?<\/script>/gi, '');
+    text = text.replace(/<style[\s\S]*?<\/style>/gi, '');
+    // Convert common block elements to newlines
+    text = text.replace(/<\/(p|div|h[1-6]|li|tr|br\s*\/?)>/gi, '\n');
+    text = text.replace(/<br\s*\/?>/gi, '\n');
+    // Strip remaining tags
+    text = text.replace(/<[^>]+>/g, '');
+    // Decode common HTML entities
+    text = text
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&nbsp;/g, ' ');
+    // Collapse whitespace
+    text = text.replace(/[ \t]+/g, ' ');
+    text = text.replace(/\n{3,}/g, '\n\n');
+    return text.trim();
+}
+
+/**
+ * WebSearch — search the web for current information.
+ *
+ * Uses a simple HTTPS fetch to DuckDuckGo's HTML search (no API key required).
+ * Falls back to a stub if the network is unavailable.
+ */
+export async function runWebSearch(
+    query: string,
+    allowedDomains?: string[],
+    blockedDomains?: string[],
+): Promise<string> {
+    if (!query.trim()) return 'Error: search query is empty';
+
+    try {
+        const encoded = encodeURIComponent(query);
+        const url = `https://html.duckduckgo.com/html/?q=${encoded}`;
+
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), WEB_TIMEOUT_MS);
+
+        const response = await fetch(url, {
+            headers: {
+                'User-Agent':
+                    'Mozilla/5.0 (compatible; BorderlessAgent/1.0)',
+            },
+            signal: controller.signal,
+        });
+        clearTimeout(timeout);
+
+        if (!response.ok) {
+            return `Error: search returned HTTP ${response.status}`;
+        }
+
+        const html = await response.text();
+
+        // Parse DuckDuckGo HTML results
+        const results: { title: string; url: string; snippet: string }[] = [];
+        const resultRegex =
+            /<a[^>]+class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi;
+        let match: RegExpExecArray | null;
+        while ((match = resultRegex.exec(html)) !== null) {
+            const rawUrl = decodeURIComponent(
+                match[1].replace(/.*uddg=/, '').split('&')[0],
+            );
+            const title = htmlToText(match[2]);
+            const snippet = htmlToText(match[3]);
+            if (title && rawUrl) {
+                results.push({ title, url: rawUrl, snippet });
+            }
+        }
+
+        // Domain filtering
+        let filtered = results;
+        if (allowedDomains && allowedDomains.length > 0) {
+            filtered = filtered.filter((r) =>
+                allowedDomains.some((d) => r.url.includes(d)),
+            );
+        }
+        if (blockedDomains && blockedDomains.length > 0) {
+            filtered = filtered.filter(
+                (r) => !blockedDomains.some((d) => r.url.includes(d)),
+            );
+        }
+
+        if (filtered.length === 0) {
+            return `No search results found for: "${query}"`;
+        }
+
+        // Format results
+        const formatted = filtered
+            .slice(0, 10)
+            .map(
+                (r, i) =>
+                    `[${i + 1}] ${r.title}\n    URL: ${r.url}\n    ${r.snippet}`,
+            )
+            .join('\n\n');
+
+        return `Search results for "${query}":\n\n${formatted}`.slice(
+            0,
+            WEB_MAX_CHARS,
+        );
+    } catch (e: any) {
+        if (e.name === 'AbortError') {
+            return `Error: search timed out after ${WEB_TIMEOUT_MS}ms`;
+        }
+        return `Error: search failed — ${e.message ?? String(e)}`;
+    }
+}
+
+/**
+ * WebFetch — fetch content from a URL and return as plain text.
+ */
+export async function runWebFetch(
+    url: string,
+    prompt: string,
+): Promise<string> {
+    if (!url.trim()) return 'Error: URL is empty';
+
+    // Basic URL validation
+    try {
+        new URL(url);
+    } catch {
+        return `Error: invalid URL — "${url}"`;
+    }
+
+    try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), WEB_TIMEOUT_MS);
+
+        const response = await fetch(url, {
+            headers: {
+                'User-Agent':
+                    'Mozilla/5.0 (compatible; BorderlessAgent/1.0)',
+                Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            },
+            signal: controller.signal,
+            redirect: 'follow',
+        });
+        clearTimeout(timeout);
+
+        if (!response.ok) {
+            return `Error: fetch returned HTTP ${response.status} for ${url}`;
+        }
+
+        const contentType = response.headers.get('content-type') ?? '';
+        const raw = await response.text();
+
+        // Convert HTML to text, or use raw for plain-text / JSON
+        let content: string;
+        if (contentType.includes('html')) {
+            content = htmlToText(raw);
+        } else {
+            content = raw;
+        }
+
+        // Truncate
+        if (content.length > WEB_MAX_CHARS) {
+            content =
+                content.slice(0, WEB_MAX_CHARS) + '\n...[truncated]';
+        }
+
+        return [
+            `— Fetched: ${url}`,
+            `— Prompt: ${prompt}`,
+            `— Content (${content.length} chars):`,
+            '',
+            content,
+        ].join('\n');
+    } catch (e: any) {
+        if (e.name === 'AbortError') {
+            return `Error: fetch timed out after ${WEB_TIMEOUT_MS}ms for ${url}`;
+        }
+        return `Error: fetch failed — ${e.message ?? String(e)}`;
+    }
 }

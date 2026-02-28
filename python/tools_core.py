@@ -1,9 +1,11 @@
 """
-tools_core.py - Tool definitions and implementations (bash, file ops, skills, tasks).
+tools_core.py - Tool definitions and implementations (bash, file ops, skills, tasks, web).
 
 Read: pagination (offset/limit) and chunked read for large files.
 Grep: context lines (before/after) around matches.
 Write: atomic write + backup before overwrite (rollback-friendly).
+WebSearch: search the web via DuckDuckGo.
+WebFetch: fetch URL content, strip to text.
 """
 
 import json
@@ -15,6 +17,10 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional
+from html.parser import HTMLParser
+from urllib.request import Request, urlopen
+from urllib.parse import urlencode, unquote
+from urllib.error import URLError, HTTPError
 
 from config import WORKDIR, default_llm_provider
 from llm_protocol import LLMProvider, LLMResponse, ToolCall
@@ -157,6 +163,42 @@ BASE_TOOLS: List[Dict[str, Any]] = [
                 "limit": {"type": "integer"},
             },
             "required": [],
+        },
+    },
+    {
+        "name": "WebSearch",
+        "description": "Search the web for current information beyond the model's knowledge cutoff. Returns formatted search results with titles, URLs, and snippets.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The search query to use"},
+                "allowed_domains": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": 'Only include results from these domains (e.g. ["github.com"])',
+                },
+                "blocked_domains": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Never include results from these domains",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "WebFetch",
+        "description": "Fetch content from a specific URL and return it as plain text. HTML is stripped to text and trimmed to a safe size.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "The URL to fetch"},
+                "prompt": {
+                    "type": "string",
+                    "description": 'Instructions for how to process the fetched content (e.g. "Extract API endpoints")',
+                },
+            },
+            "required": ["url", "prompt"],
         },
     },
 ]
@@ -609,5 +651,165 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
         return run_task(args["description"], args["prompt"], args["agent_type"])
     if name == "Skill":
         return run_skill(args["skill"])
+    if name == "WebSearch":
+        return run_web_search(
+            args.get("query", ""),
+            args.get("allowed_domains"),
+            args.get("blocked_domains"),
+        )
+    if name == "WebFetch":
+        return run_web_fetch(args.get("url", ""), args.get("prompt", ""))
     return f"Unknown tool: {name}"
+
+
+# ---------------------------------------------------------------------------
+# Web tool implementations (stdlib only: urllib + html.parser)
+# ---------------------------------------------------------------------------
+
+WEB_TIMEOUT = 30  # seconds
+WEB_MAX_CHARS = 50_000
+
+
+class _HTMLTextExtractor(HTMLParser):
+    """Strip HTML to plain text using stdlib HTMLParser."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._result: List[str] = []
+        self._skip = False
+
+    def handle_starttag(self, tag: str, attrs: list) -> None:  # type: ignore[override]
+        if tag in ("script", "style"):
+            self._skip = True
+        if tag in ("br", "p", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6"):
+            self._result.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in ("script", "style"):
+            self._skip = False
+        if tag in ("p", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6"):
+            self._result.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if not self._skip:
+            self._result.append(data)
+
+    def get_text(self) -> str:
+        text = "".join(self._result)
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+
+def _html_to_text(html: str) -> str:
+    """Convert HTML to plain text using stdlib."""
+    parser = _HTMLTextExtractor()
+    parser.feed(html)
+    return parser.get_text()
+
+
+def _fetch_url(url: str, timeout: int = WEB_TIMEOUT) -> str:
+    """Fetch URL content using urllib (stdlib)."""
+    req = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (compatible; BorderlessAgent/1.0)",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+    )
+    with urlopen(req, timeout=timeout) as resp:
+        charset = resp.headers.get_content_charset() or "utf-8"
+        return resp.read().decode(charset, errors="replace")
+
+
+def run_web_search(
+    query: str,
+    allowed_domains: Optional[List[str]] = None,
+    blocked_domains: Optional[List[str]] = None,
+) -> str:
+    """Search the web via DuckDuckGo HTML (no API key required)."""
+    if not query.strip():
+        return "Error: search query is empty"
+
+    try:
+        encoded = urlencode({"q": query})
+        url = f"https://html.duckduckgo.com/html/?{encoded}"
+        html = _fetch_url(url)
+
+        results: List[Dict[str, str]] = []
+        result_regex = re.compile(
+            r'<a[^>]+class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)</a>'
+            r'[\s\S]*?<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)</a>',
+            re.IGNORECASE,
+        )
+        for match in result_regex.finditer(html):
+            raw_url = match.group(1)
+            if "uddg=" in raw_url:
+                raw_url = unquote(raw_url.split("uddg=", 1)[1].split("&", 1)[0])
+            title = _html_to_text(match.group(2))
+            snippet = _html_to_text(match.group(3))
+            if title and raw_url:
+                results.append({"title": title, "url": raw_url, "snippet": snippet})
+
+        filtered = results
+        if allowed_domains:
+            filtered = [r for r in filtered if any(d in r["url"] for d in allowed_domains)]
+        if blocked_domains:
+            filtered = [r for r in filtered if not any(d in r["url"] for d in blocked_domains)]
+
+        if not filtered:
+            return f'No search results found for: "{query}"'
+
+        lines: List[str] = []
+        for i, r in enumerate(filtered[:10]):
+            lines.append(f'[{i + 1}] {r["title"]}')
+            lines.append(f'    URL: {r["url"]}')
+            lines.append(f'    {r["snippet"]}')
+            lines.append("")
+
+        return f'Search results for "{query}":\n\n' + "\n".join(lines).rstrip()
+
+    except HTTPError as e:
+        return f"Error: search returned HTTP {e.code}"
+    except URLError as e:
+        return f"Error: search failed \u2014 {e.reason}"
+    except Exception as e:  # noqa: BLE001
+        return f"Error: search failed \u2014 {e}"
+
+
+def run_web_fetch(url: str, prompt: str) -> str:
+    """Fetch content from a URL and return as plain text."""
+    if not url.strip():
+        return "Error: URL is empty"
+
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        return f'Error: invalid URL \u2014 "{url}"'
+
+    try:
+        raw = _fetch_url(url)
+
+        if raw.lstrip()[:100].lower().startswith(("<!doctype", "<html", "<?xml")):
+            content = _html_to_text(raw)
+        else:
+            content = raw
+
+        if len(content) > WEB_MAX_CHARS:
+            content = content[:WEB_MAX_CHARS] + "\n...[truncated]"
+
+        return "\n".join([
+            f"\u2014 Fetched: {url}",
+            f"\u2014 Prompt: {prompt}",
+            f"\u2014 Content ({len(content)} chars):",
+            "",
+            content,
+        ])
+
+    except HTTPError as e:
+        return f"Error: fetch returned HTTP {e.code} for {url}"
+    except URLError as e:
+        return f"Error: fetch failed \u2014 {e.reason}"
+    except Exception as e:  # noqa: BLE001
+        return f"Error: fetch failed \u2014 {e}"
 

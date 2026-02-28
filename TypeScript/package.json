@@ -1,6 +1,6 @@
 {
-  "name": "agentic-system",
-  "version": "0.0.1",
+  "name": "borderless-agent",
+  "version": "0.0.1-alpha.1",
   "description": "Portable agentic AI framework — build agents with custom tools, skills, and system prompts",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

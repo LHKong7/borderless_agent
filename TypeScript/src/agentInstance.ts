@@ -20,6 +20,7 @@ import { LifecycleManager, getBudget, selectHistory, assembleSystem, sanitizeUse
 import { retrieve, consolidateTurn, writeInsight, MEMORY_ENABLED } from './memoryCore';
 import { createFileBackend } from './storage/fileBackend';
 import { StorageBackend } from './storage/protocols';
+import { Sandbox } from './sandbox';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -90,6 +91,8 @@ function getBuiltinToolDefs(): ToolDefinition[] {
         runTodo,
         runSearchKnowledgeBase,
         runReadEmail,
+        runWebSearch,
+        runWebFetch,
     } = require('./toolsCore');
 
     return [
@@ -159,6 +162,41 @@ function getBuiltinToolDefs(): ToolDefinition[] {
             required: ['items'],
             execute: (args) => runTodo(args.items),
         },
+        {
+            name: 'WebSearch',
+            description:
+                'Search the web for current information. Returns formatted search results with titles, URLs, and snippets.',
+            parameters: {
+                query: { type: 'string', description: 'The search query' },
+                allowed_domains: {
+                    type: 'array',
+                    description: 'Only include results from these domains',
+                },
+                blocked_domains: {
+                    type: 'array',
+                    description: 'Exclude results from these domains',
+                },
+            },
+            required: ['query'],
+            permissionLevel: 'dangerous',
+            execute: async (args) =>
+                runWebSearch(args.query ?? '', args.allowed_domains, args.blocked_domains),
+        },
+        {
+            name: 'WebFetch',
+            description:
+                'Fetch content from a URL and return as plain text. HTML is stripped to text automatically.',
+            parameters: {
+                url: { type: 'string', description: 'The URL to fetch' },
+                prompt: {
+                    type: 'string',
+                    description: 'Instructions for processing the fetched content',
+                },
+            },
+            required: ['url', 'prompt'],
+            permissionLevel: 'dangerous',
+            execute: async (args) => runWebFetch(args.url ?? '', args.prompt ?? ''),
+        },
     ];
 }
 
@@ -199,10 +237,12 @@ export class AgentInstance {
         name: string,
         args: Record<string, any>,
     ) => Promise<boolean> | boolean;
+    private _sandbox: Sandbox;
 
     constructor(config: AgentConfig) {
         this._llm = config.llm!;
         this._maxToolRounds = config.maxToolRounds ?? 20;
+        this._sandbox = new Sandbox(config.sandbox);
         this._memoryEnabled = config.enableMemory ?? false;
         this._streamingEnabled = config.enableStreaming ?? false;
         this._contextEnabled = config.enableContext ?? true;
@@ -339,18 +379,34 @@ export class AgentInstance {
         const tool = this._toolMap.get(name);
         if (!tool) return `Unknown tool: ${name}`;
 
-        // Approval check
-        if (tool.requiresApproval && this._approvalCallback) {
+        // Sandbox permission check (handles file guards, command analysis, etc.)
+        const decision = this._sandbox.checkPermission(name, args);
+
+        if (decision.behavior === 'deny') {
+            return decision.message || 'Operation blocked by sandbox';
+        }
+
+        if (decision.behavior === 'ask') {
+            // If approval callback is set, delegate to it
+            if (this._approvalCallback) {
+                const approved = await this._approvalCallback(name, args);
+                if (!approved) return 'Action not approved by user.';
+            } else {
+                // No callback and sandbox says ask — deny by default
+                return decision.message || 'Operation requires confirmation but no approval callback set';
+            }
+        }
+
+        // Legacy requiresApproval check (for user-defined tools)
+        if (tool.requiresApproval && this._approvalCallback && decision.behavior === 'allow') {
             const approved = await this._approvalCallback(name, args);
             if (!approved) return 'Action not approved by user.';
         }
 
-        try {
-            const result = await tool.execute(args);
-            return result;
-        } catch (e: any) {
-            return `Error: ${e.message ?? String(e)}`;
-        }
+        // Execute with sandbox timeout & output limits
+        return this._sandbox.wrapExecution(async () => {
+            return await tool.execute(args);
+        });
     }
 
     private _buildSystemForTurn(userInput: string): string {

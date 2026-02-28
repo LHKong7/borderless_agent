@@ -48,6 +48,7 @@ class ToolDefinition:
     required: List[str] = field(default_factory=list)
     execute: Callable[[Dict[str, Any]], str] = field(default=lambda args: "")
     requires_approval: bool = False
+    permission_level: Optional[str] = None  # 'safe' | 'moderate' | 'dangerous' | 'critical'
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +109,7 @@ class AgentConfig:
     enable_context: bool = True
     max_tool_rounds: int = 20
     approval_callback: Optional[Callable[[str, Dict[str, Any]], bool]] = None
+    sandbox: Any = None  # SandboxConfig from sandbox.py
 
 
 # ---------------------------------------------------------------------------

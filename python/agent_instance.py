@@ -30,6 +30,7 @@ from context_core import (
     select_history,
 )
 from memory_core import consolidate_turn, retrieve
+from sandbox import Sandbox
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +107,8 @@ def _get_builtin_tool_defs() -> List[ToolDefinition]:
         run_write,
         run_edit,
         run_todo,
+        run_web_search,
+        run_web_fetch,
     )
 
     return [
@@ -184,6 +187,33 @@ def _get_builtin_tool_defs() -> List[ToolDefinition]:
             required=["items"],
             execute=lambda args: run_todo(args.get("items", [])),
         ),
+        ToolDefinition(
+            name="WebSearch",
+            description="Search the web for current information. Returns formatted search results with titles, URLs, and snippets.",
+            parameters={
+                "query": {"type": "string", "description": "The search query"},
+                "allowed_domains": {"type": "array", "description": "Only include results from these domains"},
+                "blocked_domains": {"type": "array", "description": "Exclude results from these domains"},
+            },
+            required=["query"],
+            permission_level="dangerous",
+            execute=lambda args: run_web_search(
+                args.get("query", ""),
+                args.get("allowed_domains"),
+                args.get("blocked_domains"),
+            ),
+        ),
+        ToolDefinition(
+            name="WebFetch",
+            description="Fetch content from a URL and return as plain text. HTML is stripped to text automatically.",
+            parameters={
+                "url": {"type": "string", "description": "The URL to fetch"},
+                "prompt": {"type": "string", "description": "Instructions for processing the fetched content"},
+            },
+            required=["url", "prompt"],
+            permission_level="dangerous",
+            execute=lambda args: run_web_fetch(args.get("url", ""), args.get("prompt", "")),
+        ),
     ]
 
 
@@ -258,6 +288,9 @@ class AgentInstance:
         self._streaming_enabled = config.enable_streaming
         self._context_enabled = config.enable_context
         self._approval_callback = config.approval_callback
+
+        # Sandbox
+        self._sandbox = Sandbox(config.sandbox)
 
         # Assemble tools
         self._tools: List[ToolDefinition] = []
@@ -350,15 +383,30 @@ class AgentInstance:
         if not tool:
             return f"Unknown tool: {name}"
 
-        if tool.requires_approval and self._approval_callback:
+        # Sandbox permission check (handles file guards, command analysis, etc.)
+        decision = self._sandbox.check_permission(name, args)
+
+        if decision.behavior == 'deny':
+            return decision.message or 'Operation blocked by sandbox'
+
+        if decision.behavior == 'ask':
+            # If approval callback is set, delegate to it
+            if self._approval_callback:
+                approved = self._approval_callback(name, args)
+                if not approved:
+                    return 'Action not approved by user.'
+            else:
+                # No callback and sandbox says ask — deny by default
+                return decision.message or 'Operation requires confirmation but no approval callback set'
+
+        # Legacy requires_approval check (for user-defined tools)
+        if tool.requires_approval and self._approval_callback and decision.behavior == 'allow':
             approved = self._approval_callback(name, args)
             if not approved:
-                return "Action not approved by user."
+                return 'Action not approved by user.'
 
-        try:
-            return tool.execute(args)
-        except Exception as e:
-            return f"Error: {e}"
+        # Execute with sandbox timeout & output limits
+        return self._sandbox.wrap_execution(lambda: tool.execute(args))
 
     def _build_system_for_turn(self, user_input: str) -> str:
         if not self._context_enabled:

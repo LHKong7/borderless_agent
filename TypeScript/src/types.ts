@@ -5,6 +5,7 @@
  */
 
 import type { LLMProvider } from './llmProtocol';
+import type { SandboxConfig } from './sandbox';
 
 // ---------------------------------------------------------------------------
 // Tool definition (user-facing)
@@ -51,6 +52,11 @@ export interface ToolDefinition {
      * execution (only relevant when approval callbacks are set).
      */
     requiresApproval?: boolean;
+    /**
+     * Permission level for sandbox classification.
+     * 'safe' = read-only, 'moderate' = file mods, 'dangerous' = execution, 'critical' = unrestricted.
+     */
+    permissionLevel?: 'safe' | 'moderate' | 'dangerous' | 'critical';
 }
 
 // ---------------------------------------------------------------------------
@@ -124,6 +130,8 @@ export interface AgentConfig {
     maxToolRounds?: number;
     /** Callback for executor approval. Return true to approve. */
     approvalCallback?: (toolName: string, args: Record<string, any>) => Promise<boolean> | boolean;
+    /** Sandbox configuration for isolating tool execution. */
+    sandbox?: SandboxConfig;
 }
 
 // ---------------------------------------------------------------------------

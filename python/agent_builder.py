@@ -181,6 +181,39 @@ class AgentBuilder:
         self._config.approval_callback = callback
         return self
 
+    # ---- Sandbox ----
+
+    def set_sandbox(
+        self,
+        allowed_paths: Optional[List[str]] = None,
+        denied_paths: Optional[List[str]] = None,
+        blocked_commands: Optional[List[str]] = None,
+        blocked_patterns: Optional[List[str]] = None,
+        allowed_commands: Optional[List[str]] = None,
+        max_execution_secs: float = 30.0,
+        max_output_chars: int = 50_000,
+        allow_network: bool = True,
+        allow_env_passthrough: bool = False,
+        on_violation: str = "error",
+    ) -> "AgentBuilder":
+        """Configure the execution sandbox."""
+        from sandbox import SandboxConfig
+
+        self._config.sandbox = SandboxConfig(
+            enabled=True,
+            allowed_paths=allowed_paths or [__import__("os").getcwd()],
+            denied_paths=denied_paths or [],
+            blocked_commands=blocked_commands or [],
+            blocked_patterns=blocked_patterns or [],
+            allowed_commands=allowed_commands,
+            max_execution_secs=max_execution_secs,
+            max_output_chars=max_output_chars,
+            allow_network=allow_network,
+            allow_env_passthrough=allow_env_passthrough,
+            on_violation=on_violation,
+        )
+        return self
+
     # ---- Build ----
 
     def build(self) -> "AgentInstance":
