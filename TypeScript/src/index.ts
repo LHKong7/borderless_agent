@@ -29,6 +29,10 @@ export type {
     ChatResult,
     StreamChunk,
     AgentSession,
+    AutonomousTaskConfig,
+    AutonomousTaskResult,
+    IterationProgress,
+    AutonomousPhase,
 } from './types';
 
 // ---- LLM provider (for advanced users who want to supply their own) ----

@@ -19,6 +19,8 @@ from agent_types import (
     SkillDefinition,
     StreamChunk,
     ToolDefinition,
+    AutonomousTaskConfig,
+    AutonomousTaskResult,
 )
 from llm_protocol import LLMProvider, LLMResponse
 from session_core import Session, SessionManager
@@ -375,6 +377,16 @@ class AgentInstance:
     @property
     def tools(self) -> List[ToolDefinition]:
         return list(self._tools)
+
+    def run_task(self, config: AutonomousTaskConfig) -> AutonomousTaskResult:
+        """Run an autonomous task loop.
+
+        The agent iterates through plan → execute → review → evaluate phases
+        until self-evaluation meets the quality threshold or max iterations.
+        """
+        from autonomous_loop import AutonomousLoop
+        loop = AutonomousLoop(self)
+        return loop.run(config)
 
     # ---- Internal ----
 

@@ -174,3 +174,62 @@ export interface AgentSession {
     /** Persist the session to storage. */
     save(): Promise<void>;
 }
+
+// ---------------------------------------------------------------------------
+// Autonomous task types
+// ---------------------------------------------------------------------------
+
+/** Phase within a single iteration of the autonomous loop. */
+export type AutonomousPhase = 'plan' | 'execute' | 'review' | 'evaluate';
+
+/**
+ * Configuration for `agent.runTask()` — an autonomous loop that iterates
+ * through plan → execute → review → evaluate until quality meets threshold.
+ */
+export interface AutonomousTaskConfig {
+    /** Task description from the user. */
+    task: string;
+    /** Quality threshold (1–10). Loop exits when self-eval ≥ this. Default: 7. */
+    qualityThreshold?: number;
+    /** Maximum outer-loop iterations. Default: 10. */
+    maxIterations?: number;
+    /**
+     * Callback invoked after each phase completes.
+     * Return `false` to abort the loop early.
+     */
+    onProgress?: (progress: IterationProgress) => void | boolean | Promise<void | boolean>;
+}
+
+/** Progress snapshot emitted after each phase of an iteration. */
+export interface IterationProgress {
+    /** Current iteration number (1-based). */
+    iteration: number;
+    /** Phase that just completed. */
+    phase: AutonomousPhase;
+    /** Quality score (only present after 'evaluate' phase). */
+    qualityScore?: number;
+    /** Plan text (after 'plan' phase). */
+    plan?: string;
+    /** Execution output (after 'execute' phase). */
+    output?: string;
+    /** Review text (after 'review' phase). */
+    review?: string;
+    /** Evaluation JSON text (after 'evaluate' phase). */
+    evaluation?: string;
+}
+
+/** Result of `agent.runTask()`. */
+export interface AutonomousTaskResult {
+    /** Final consolidated output. */
+    result: string;
+    /** Number of iterations executed. */
+    iterations: number;
+    /** Final quality score from self-evaluation. */
+    qualityScore: number;
+    /** Whether the quality threshold was met. */
+    thresholdMet: boolean;
+    /** History of all iteration progress snapshots. */
+    progressHistory: IterationProgress[];
+    /** Full conversation history. */
+    history: Record<string, any>[];
+}

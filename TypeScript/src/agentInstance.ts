@@ -13,7 +13,10 @@ import {
     ChatResult,
     StreamChunk,
     AgentSession,
+    AutonomousTaskConfig,
+    AutonomousTaskResult,
 } from './types';
+import { AutonomousLoop } from './autonomousLoop';
 import { LLMProvider, LLMResponse, ToolCall } from './llmProtocol';
 import { SessionManager, Session } from './sessionCore';
 import { LifecycleManager, getBudget, selectHistory, assembleSystem, sanitizeUserInput, foldObservation, contextEnabled as envContextEnabled } from './contextCore';
@@ -336,6 +339,17 @@ export class AgentInstance {
     /** Get the list of registered tools. */
     get tools(): ToolDefinition[] {
         return [...this._tools];
+    }
+
+    /**
+     * Run an autonomous task loop.
+     *
+     * The agent iterates through plan → execute → review → evaluate phases
+     * until self-evaluation meets the quality threshold or max iterations.
+     */
+    async runTask(config: AutonomousTaskConfig): Promise<AutonomousTaskResult> {
+        const loop = new AutonomousLoop(this);
+        return loop.run(config);
     }
 
     // ---- Session wrapper ----

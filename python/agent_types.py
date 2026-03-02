@@ -153,3 +153,45 @@ class AgentSession(Protocol):
     def get_history(self) -> List[Dict[str, Any]]: ...
 
     def save(self) -> None: ...
+
+
+# ---------------------------------------------------------------------------
+# Autonomous task types
+# ---------------------------------------------------------------------------
+
+AutonomousPhase = str  # Literal['plan', 'execute', 'review', 'evaluate']
+
+
+@dataclass
+class AutonomousTaskConfig:
+    """Configuration for ``agent.run_task()``."""
+
+    task: str
+    quality_threshold: int = 7
+    max_iterations: int = 10
+    on_progress: Optional[Callable[['IterationProgress'], Optional[bool]]] = None
+
+
+@dataclass
+class IterationProgress:
+    """Progress snapshot emitted after each phase."""
+
+    iteration: int = 0
+    phase: AutonomousPhase = 'plan'
+    quality_score: Optional[int] = None
+    plan: Optional[str] = None
+    output: Optional[str] = None
+    review: Optional[str] = None
+    evaluation: Optional[str] = None
+
+
+@dataclass
+class AutonomousTaskResult:
+    """Result of ``agent.run_task()``."""
+
+    result: str = ''
+    iterations: int = 0
+    quality_score: int = 0
+    threshold_met: bool = False
+    progress_history: List[IterationProgress] = field(default_factory=list)
+    history: List[Dict[str, Any]] = field(default_factory=list)

@@ -31,6 +31,9 @@ from agent_types import (  # noqa: F401
     StorageConfig,
     StreamChunk,
     ToolDefinition,
+    AutonomousTaskConfig,
+    AutonomousTaskResult,
+    IterationProgress,
 )
 
 # LLM provider (for advanced users)
@@ -55,6 +58,10 @@ __all__ = [
     "ChatResult",
     "StreamChunk",
     "AgentSession",
+    # Autonomous task
+    "AutonomousTaskConfig",
+    "AutonomousTaskResult",
+    "IterationProgress",
     # LLM
     "LLMProvider",
     "LLMResponse",
