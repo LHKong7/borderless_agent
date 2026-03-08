@@ -137,6 +137,22 @@ export class AgentBuilder {
         return this;
     }
 
+    // ---- MCP ----
+
+    /** Add an MCP server to connect to when the agent is built. */
+    addMCPServer(config: import('./mcpClient').MCPServerConfig): this {
+        this._config.mcpServers = this._config.mcpServers ?? [];
+        this._config.mcpServers.push(config);
+        return this;
+    }
+
+    /** Add multiple MCP servers at once. */
+    addMCPServers(configs: import('./mcpClient').MCPServerConfig[]): this {
+        this._config.mcpServers = this._config.mcpServers ?? [];
+        this._config.mcpServers.push(...configs);
+        return this;
+    }
+
     // ---- Sandbox ----
 
     /** Configure the execution sandbox (file guards, command filtering, resource limits). */

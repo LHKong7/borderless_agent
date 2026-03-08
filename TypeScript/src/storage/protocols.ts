@@ -1,27 +1,30 @@
 /**
  * storage/protocols.ts - Storage interfaces for Session, Memory, Skill, and Context stores.
+ *
+ * All methods are async (Promise-returning) to support cloud-native backends
+ * such as @vercel/storage, Supabase, Planetscale, and S3.
  */
 
 export interface SessionStore {
-    get(sessionId: string): Record<string, any> | null;
-    put(sessionId: string, data: Record<string, any>): void;
-    listSummaries(limit?: number): Record<string, any>[];
-    listIds(): string[];
+    get(sessionId: string): Promise<Record<string, any> | null>;
+    put(sessionId: string, data: Record<string, any>): Promise<void>;
+    listSummaries(limit?: number): Promise<Record<string, any>[]>;
+    listIds(): Promise<string[]>;
 }
 
 export interface MemoryStore {
-    load(): Record<string, any>[];
-    save(items: Record<string, any>[]): void;
+    load(): Promise<Record<string, any>[]>;
+    save(items: Record<string, any>[]): Promise<void>;
 }
 
 export interface SkillStore {
-    listSkills(): string[];
-    getSkill(name: string): Record<string, any> | null;
+    listSkills(): Promise<string[]>;
+    getSkill(name: string): Promise<Record<string, any> | null>;
 }
 
 export interface ContextStore {
-    get(sessionId: string): Record<string, any> | null;
-    set(sessionId: string, data: Record<string, any>): void;
+    get(sessionId: string): Promise<Record<string, any> | null>;
+    set(sessionId: string, data: Record<string, any>): Promise<void>;
 }
 
 export class StorageBackend {

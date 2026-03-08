@@ -95,6 +95,8 @@ export interface LLMConfig {
 
 export interface StorageConfig {
     backend: 'file' | 'cloud' | 'memory';
+    /** Inject a pre-built StorageBackend directly (overrides backend selection). */
+    custom?: import('./storage/protocols').StorageBackend;
     /** For file backend: root directory for all data. */
     dir?: string;
     /** For cloud backend: S3 bucket name. */
@@ -132,6 +134,8 @@ export interface AgentConfig {
     approvalCallback?: (toolName: string, args: Record<string, any>) => Promise<boolean> | boolean;
     /** Sandbox configuration for isolating tool execution. */
     sandbox?: SandboxConfig;
+    /** MCP server configurations to connect to. */
+    mcpServers?: import('./mcpClient').MCPServerConfig[];
 }
 
 // ---------------------------------------------------------------------------

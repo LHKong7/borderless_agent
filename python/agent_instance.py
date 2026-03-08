@@ -330,6 +330,11 @@ class AgentInstance:
                 store = backend.session_store
         self._session_mgr = SessionManager(store=store)
 
+        # MCP servers (connected lazily on first _run_loop call)
+        self._mcp_configs = config.mcp_servers or []
+        self._mcp_manager = None
+        self._mcp_initialized = False
+
     # ---- Public API ----
 
     def chat(
@@ -378,7 +383,7 @@ class AgentInstance:
     def tools(self) -> List[ToolDefinition]:
         return list(self._tools)
 
-    def run_task(self, config: AutonomousTaskConfig) -> AutonomousTaskResult:
+    async def run_task(self, config: AutonomousTaskConfig) -> AutonomousTaskResult:
         """Run an autonomous task loop.
 
         The agent iterates through plan → execute → review → evaluate phases
@@ -386,11 +391,45 @@ class AgentInstance:
         """
         from autonomous_loop import AutonomousLoop
         loop = AutonomousLoop(self)
-        return loop.run(config)
+        return await loop.run(config)
+
+    def _init_mcp(self) -> None:
+        """Initialize MCP server connections (called lazily on first use)."""
+        if self._mcp_initialized or not self._mcp_configs:
+            return
+
+        from mcp_client import MCPManager
+
+        self._mcp_manager = MCPManager()
+        self._mcp_manager.connect(self._mcp_configs)
+
+        # Merge MCP tools into the agent's tool list
+        mcp_defs = self._mcp_manager.get_tool_definitions()
+        for mcp_tool in mcp_defs:
+            self._openai_tools.append({
+                "type": "function",
+                "function": {
+                    "name": mcp_tool["name"],
+                    "description": mcp_tool["description"],
+                    "parameters": mcp_tool["input_schema"],
+                },
+            })
+        self._mcp_initialized = True
+
+    def close(self) -> None:
+        """Gracefully shut down MCP server connections."""
+        if self._mcp_manager:
+            self._mcp_manager.close()
+            self._mcp_manager = None
+            self._mcp_initialized = False
 
     # ---- Internal ----
 
     def _execute_tool(self, name: str, args: Dict[str, Any]) -> str:
+        # Route MCP tools to MCPManager
+        if self._mcp_manager and self._mcp_manager.is_mcp_tool(name):
+            return self._mcp_manager.call_tool(name, args)
+
         tool = self._tool_map.get(name)
         if not tool:
             return f"Unknown tool: {name}"
@@ -439,6 +478,7 @@ class AgentInstance:
         user_input: str,
         history: List[Dict[str, Any]],
     ) -> ChatResult:
+        self._init_mcp()
         sanitized = sanitize_user_input(user_input)
         message = sanitized[0] if isinstance(sanitized, tuple) else sanitized
 
@@ -532,6 +572,7 @@ class AgentInstance:
         user_input: str,
         history: List[Dict[str, Any]],
     ) -> Generator[StreamChunk, None, None]:
+        self._init_mcp()
         sanitized = sanitize_user_input(user_input)
         message = sanitized[0] if isinstance(sanitized, tuple) else sanitized
 

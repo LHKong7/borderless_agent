@@ -45,6 +45,9 @@ from storage import get_storage_backend  # noqa: F401
 # Session manager (for direct access)
 from session_core import Session, SessionManager  # noqa: F401
 
+# MCP
+from mcp_client import MCPServerConfig, MCPManager  # noqa: F401
+
 __all__ = [
     # Core API
     "AgentBuilder",
@@ -71,4 +74,7 @@ __all__ = [
     # Session
     "Session",
     "SessionManager",
+    # MCP
+    "MCPServerConfig",
+    "MCPManager",
 ]

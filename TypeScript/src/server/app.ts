@@ -58,32 +58,32 @@ const app = express();
 app.use(express.json());
 
 // POST /sessions — create new session
-app.post('/sessions', (_req: Request, res: Response) => {
+app.post('/sessions', async (_req: Request, res: Response) => {
     const mgr = getSessionMgr();
-    const session = mgr.createSession({ context: { started: true } });
+    const session = await mgr.createSession({ context: { started: true } });
     res.status(201).json({ session_id: session.id });
 });
 
 // GET /sessions — list sessions
-app.get('/sessions', (req: Request, res: Response) => {
+app.get('/sessions', async (req: Request, res: Response) => {
     const mgr = getSessionMgr();
     const limit = Math.min(
         Math.max(parseInt(String(req.query.limit ?? '20'), 10) || 20, 1),
         100,
     );
-    const summaries = mgr.listSessionsSummary(limit);
+    const summaries = await mgr.listSessionsSummary(limit);
     res.json(summaries);
 });
 
 // GET /sessions/:id — get session info
-app.get('/sessions/:sessionId', (req: Request, res: Response) => {
+app.get('/sessions/:sessionId', async (req: Request, res: Response) => {
     const mgr = getSessionMgr();
-    const session = mgr.restoreSession(req.params.sessionId);
+    const session = await mgr.restoreSession(req.params.sessionId);
     if (!session) {
         res.status(404).json({ detail: 'Session not found' });
         return;
     }
-    const turns = session.history.filter((m) => m.role === 'user').length;
+    const turns = session.history.filter((m: Record<string, any>) => m.role === 'user').length;
     res.json({
         id: session.id,
         updated_at: session.updatedAt,
@@ -96,12 +96,12 @@ app.get('/sessions/:sessionId', (req: Request, res: Response) => {
 app.post('/sessions/:sessionId/turn', async (req: Request, res: Response) => {
     const mgr = getSessionMgr();
     const createIfMissing = req.query.create_if_missing === 'true';
-    let session = mgr.restoreSession(req.params.sessionId);
+    let session = await mgr.restoreSession(req.params.sessionId);
     let created = false;
 
     if (!session) {
         if (createIfMissing) {
-            session = mgr.createSession({ context: { started: true } });
+            session = await mgr.createSession({ context: { started: true } });
             created = true;
         } else {
             res.status(404).json({ detail: 'Session not found' });
@@ -147,11 +147,11 @@ app.post(
     async (req: Request, res: Response) => {
         const mgr = getSessionMgr();
         const createIfMissing = req.query.create_if_missing === 'true';
-        let session = mgr.restoreSession(req.params.sessionId);
+        let session = await mgr.restoreSession(req.params.sessionId);
 
         if (!session) {
             if (createIfMissing) {
-                session = mgr.createSession({ context: { started: true } });
+                session = await mgr.createSession({ context: { started: true } });
             } else {
                 res.status(404).json({ detail: 'Session not found' });
                 return;

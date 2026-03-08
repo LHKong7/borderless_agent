@@ -20,10 +20,11 @@ import { AutonomousLoop } from './autonomousLoop';
 import { LLMProvider, LLMResponse, ToolCall } from './llmProtocol';
 import { SessionManager, Session } from './sessionCore';
 import { LifecycleManager, getBudget, selectHistory, assembleSystem, sanitizeUserInput, foldObservation, contextEnabled as envContextEnabled } from './contextCore';
-import { retrieve, consolidateTurn, writeInsight, MEMORY_ENABLED } from './memoryCore';
+import { retrieve, consolidateTurn, writeInsight, setMemoryStore, MEMORY_ENABLED } from './memoryCore';
 import { createFileBackend } from './storage/fileBackend';
 import { StorageBackend } from './storage/protocols';
 import { Sandbox } from './sandbox';
+import { MCPManager, MCPServerConfig } from './mcpClient';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -241,6 +242,10 @@ export class AgentInstance {
         args: Record<string, any>,
     ) => Promise<boolean> | boolean;
     private _sandbox: Sandbox;
+    private _mcpManager: MCPManager | null = null;
+    private _mcpConfigs: MCPServerConfig[];
+    private _mcpInitialized: boolean = false;
+    private _mcpInitPromise: Promise<void> | null = null;
 
     constructor(config: AgentConfig) {
         this._llm = config.llm!;
@@ -280,14 +285,56 @@ export class AgentInstance {
         // Storage & session manager
         let storage: StorageBackend | undefined;
         if (config.storage) {
-            if (config.storage.backend === 'file') {
+            if (config.storage.custom) {
+                // User-provided StorageBackend (e.g. @vercel/storage, Supabase)
+                storage = config.storage.custom;
+            } else if (config.storage.backend === 'cloud') {
+                // S3-compatible cloud backend (dynamic import to avoid requiring @aws-sdk when unused)
+                const { createCloudBackend } = require('./storage/cloudBackend');
+                storage = createCloudBackend();
+            } else if (config.storage.backend === 'file') {
                 storage = createFileBackend({ sessionDir: config.storage.dir });
             }
-            // cloud and memory backends can be added here
         }
         this._sessionMgr = new SessionManager({
             store: storage?.sessionStore ?? undefined,
         });
+        if (storage?.memoryStore && this._memoryEnabled) {
+            setMemoryStore(storage.memoryStore);
+        }
+
+        // MCP servers (connected lazily since connect is async)
+        this._mcpConfigs = config.mcpServers ?? [];
+    }
+
+    /**
+     * Initialize MCP server connections. Called lazily on first chat/stream,
+     * or can be called explicitly for eager initialization.
+     */
+    async initMCP(): Promise<void> {
+        if (this._mcpInitialized || !this._mcpConfigs.length) return;
+        if (this._mcpInitPromise) return this._mcpInitPromise;
+
+        this._mcpInitPromise = (async () => {
+            this._mcpManager = new MCPManager();
+            await this._mcpManager.connect(this._mcpConfigs);
+
+            // Merge MCP tools into the agent's tool list
+            const mcpToolDefs = this._mcpManager.getToolDefinitions();
+            for (const mcpTool of mcpToolDefs) {
+                this._openaiTools.push({
+                    type: 'function',
+                    function: {
+                        name: mcpTool.name,
+                        description: mcpTool.description,
+                        parameters: mcpTool.input_schema,
+                    },
+                });
+            }
+            this._mcpInitialized = true;
+        })();
+
+        return this._mcpInitPromise;
     }
 
     // ---- Public API ----
@@ -309,25 +356,25 @@ export class AgentInstance {
     }
 
     /** Create a new session (persisted, maintains conversation history). */
-    createSession(): AgentSession {
-        const session = this._sessionMgr.createSession({ context: {} });
+    async createSession(): Promise<AgentSession> {
+        const session = await this._sessionMgr.createSession({ context: {} });
         return this._wrapSession(session);
     }
 
     /** Restore a previously saved session by ID. */
-    restoreSession(sessionId: string): AgentSession | null {
-        const session = this._sessionMgr.restoreSession(sessionId);
+    async restoreSession(sessionId: string): Promise<AgentSession | null> {
+        const session = await this._sessionMgr.restoreSession(sessionId);
         if (!session) return null;
         return this._wrapSession(session);
     }
 
     /** List saved session IDs. */
-    listSessions(): string[] {
+    async listSessions(): Promise<string[]> {
         return this._sessionMgr.listSessionIds();
     }
 
     /** List saved session summaries. */
-    listSessionSummaries(limit?: number): Record<string, any>[] {
+    async listSessionSummaries(limit?: number): Promise<Record<string, any>[]> {
         return this._sessionMgr.listSessionsSummary(limit);
     }
 
@@ -352,6 +399,19 @@ export class AgentInstance {
         return loop.run(config);
     }
 
+    /**
+     * Gracefully shut down MCP server connections.
+     * Call this when the agent is no longer needed to release resources.
+     */
+    async close(): Promise<void> {
+        if (this._mcpManager) {
+            await this._mcpManager.close();
+            this._mcpManager = null;
+            this._mcpInitialized = false;
+            this._mcpInitPromise = null;
+        }
+    }
+
     // ---- Session wrapper ----
 
     private _wrapSession(session: Session): AgentSession {
@@ -364,22 +424,22 @@ export class AgentInstance {
                 const result = await self._runLoop(message, session.history);
                 session.history = result.history;
                 session.updatedAt = Date.now() / 1000;
-                self._sessionMgr.saveSession(session);
+                await self._sessionMgr.saveSession(session);
                 return { ...result, sessionId: session.id };
             },
             async *stream(message: string): AsyncGenerator<StreamChunk> {
                 const chunks: string[] = [];
-                yield* self._runLoopStream(message, session.history, (fullResult) => {
+                yield* self._runLoopStream(message, session.history, async (fullResult) => {
                     session.history = fullResult.history;
                     session.updatedAt = Date.now() / 1000;
-                    self._sessionMgr.saveSession(session);
+                    await self._sessionMgr.saveSession(session);
                 });
             },
             getHistory(): Record<string, any>[] {
                 return [...session.history];
             },
             async save(): Promise<void> {
-                self._sessionMgr.saveSession(session);
+                await self._sessionMgr.saveSession(session);
             },
         };
     }
@@ -390,6 +450,11 @@ export class AgentInstance {
         name: string,
         args: Record<string, any>,
     ): Promise<string> {
+        // Route MCP tools to MCPManager
+        if (this._mcpManager?.isMCPTool(name)) {
+            return this._mcpManager.callTool(name, args);
+        }
+
         const tool = this._toolMap.get(name);
         if (!tool) return `Unknown tool: ${name}`;
 
@@ -423,12 +488,12 @@ export class AgentInstance {
         });
     }
 
-    private _buildSystemForTurn(userInput: string): string {
+    private async _buildSystemForTurn(userInput: string): Promise<string> {
         if (!this._contextEnabled) return this._systemPrompt;
 
         let ragLines: string[] | undefined;
         if (this._memoryEnabled) {
-            const memories = retrieve(userInput, 5);
+            const memories = await retrieve(userInput, 5);
             ragLines = memories.map((m) => m[0]).filter(Boolean);
         }
 
@@ -442,9 +507,10 @@ export class AgentInstance {
         userInput: string,
         history: Record<string, any>[],
     ): Promise<ChatResult> {
+        await this.initMCP();
         const sanitized = sanitizeUserInput(userInput);
         const message = sanitized.text;
-        const system = this._buildSystemForTurn(message);
+        const system = await this._buildSystemForTurn(message);
 
         // Trim history if context management enabled
         let workingHistory = [...history];
@@ -477,7 +543,7 @@ export class AgentInstance {
             if (!tcs.length) {
                 workingHistory.push({ role: 'assistant', content: content.trim() });
                 if (this._memoryEnabled) {
-                    consolidateTurn(message, content.trim());
+                    await consolidateTurn(message, content.trim());
                 }
                 // Sync back
                 history.length = 0;
@@ -547,9 +613,10 @@ export class AgentInstance {
         history: Record<string, any>[],
         onComplete?: (result: ChatResult) => void,
     ): AsyncGenerator<StreamChunk> {
+        await this.initMCP();
         const sanitized = sanitizeUserInput(userInput);
         const message = sanitized.text;
-        const system = this._buildSystemForTurn(message);
+        const system = await this._buildSystemForTurn(message);
 
         let workingHistory = [...history];
         if (this._contextEnabled) {
@@ -589,7 +656,7 @@ export class AgentInstance {
             if (!tcs.length) {
                 workingHistory.push({ role: 'assistant', content: content.trim() });
                 if (this._memoryEnabled) {
-                    consolidateTurn(message, content.trim());
+                    await consolidateTurn(message, content.trim());
                 }
                 history.length = 0;
                 history.push(...workingHistory);

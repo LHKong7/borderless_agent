@@ -45,6 +45,10 @@ export { createCloudBackend as createCloudStorage } from './storage/cloudBackend
 export { StorageBackend } from './storage/protocols';
 export type { SessionStore, MemoryStore, SkillStore, ContextStore } from './storage/protocols';
 
+// ---- MCP ----
+export { MCPManager } from './mcpClient';
+export type { MCPServerConfig } from './mcpClient';
+
 // ---- Session manager (for direct access) ----
 export { SessionManager, Session } from './sessionCore';
 

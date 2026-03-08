@@ -19,8 +19,8 @@ import { WORKDIR } from './config';
 // ---------------------------------------------------------------------------
 
 export interface MemoryStore {
-    load(): Record<string, any>[];
-    save(items: Record<string, any>[]): void;
+    load(): Promise<Record<string, any>[]>;
+    save(items: Record<string, any>[]): Promise<void>;
 }
 
 let _memoryStore: MemoryStore | null = null;
@@ -57,7 +57,7 @@ function ensureDir(dir: string): void {
     fs.mkdirSync(dir, { recursive: true });
 }
 
-function loadMemories(): Record<string, any>[] {
+async function loadMemories(): Promise<Record<string, any>[]> {
     if (_memoryStore) return _memoryStore.load();
     ensureDir(MEMORY_DIR);
     if (!fs.existsSync(MEMORY_FILE)) return [];
@@ -68,10 +68,10 @@ function loadMemories(): Record<string, any>[] {
     }
 }
 
-function saveMemories(items: Record<string, any>[]): void {
+async function saveMemories(items: Record<string, any>[]): Promise<void> {
     const sanitized = sanitizeForStorage(items);
     if (_memoryStore) {
-        _memoryStore.save(sanitized);
+        await _memoryStore.save(sanitized);
         return;
     }
     ensureDir(MEMORY_DIR);
@@ -245,8 +245,8 @@ function recencyScore(createdTs: number, now: number): number {
 // Core memory operations
 // ---------------------------------------------------------------------------
 
-export function writeEvent(content: string, importance: number = 0.5): void {
-    const items = loadMemories();
+export async function writeEvent(content: string, importance: number = 0.5): Promise<void> {
+    const items = await loadMemories();
     const now = Date.now() / 1000;
     items.push({
         id: uuidv4(),
@@ -256,11 +256,11 @@ export function writeEvent(content: string, importance: number = 0.5): void {
         created_at: now,
         last_accessed: now,
     });
-    saveMemories(items);
+    await saveMemories(items);
 }
 
-export function writeInsight(content: string, importance: number = 0.6): void {
-    const items = loadMemories();
+export async function writeInsight(content: string, importance: number = 0.6): Promise<void> {
+    const items = await loadMemories();
     const now = Date.now() / 1000;
     items.push({
         id: uuidv4(),
@@ -270,18 +270,18 @@ export function writeInsight(content: string, importance: number = 0.6): void {
         created_at: now,
         last_accessed: now,
     });
-    saveMemories(items);
+    await saveMemories(items);
 }
 
-export function retrieve(
+export async function retrieve(
     query: string,
     k: number = 5,
     alpha: number = ALPHA_RECENCY,
     beta: number = BETA_IMPORTANCE,
     gamma: number = GAMMA_RELEVANCE,
-): [string, number, Record<string, any>][] {
+): Promise<[string, number, Record<string, any>][]> {
     if (!MEMORY_ENABLED) return [];
-    const items = loadMemories();
+    const items = await loadMemories();
     if (!items.length) return [];
     const now = Date.now() / 1000;
     const scored: [number, Record<string, any>][] = [];
@@ -296,11 +296,11 @@ export function retrieve(
     return scored.slice(0, k).map(([score, m]) => [m.content, score, m]);
 }
 
-export function garbageCollect(
+export async function garbageCollect(
     maxItems: number = MAX_MEMORY_ITEMS,
     maxAgeDays: number = MAX_MEMORY_AGE_DAYS,
-): number {
-    const items = loadMemories();
+): Promise<number> {
+    const items = await loadMemories();
     const now = Date.now() / 1000;
     const cutoffTs = now - maxAgeDays * 86400;
     let kept = items.filter(
@@ -311,19 +311,19 @@ export function garbageCollect(
     );
     kept = kept.slice(0, maxItems);
     const removed = items.length - kept.length;
-    saveMemories(kept);
+    await saveMemories(kept);
     return removed;
 }
 
-export function consolidateTurn(
+export async function consolidateTurn(
     userMessage: string,
     assistantSummary: string,
     toolCallsSummary?: { name: string; success: boolean }[],
-): void {
+): Promise<void> {
     if (!MEMORY_ENABLED) return;
     if (!userMessage && !assistantSummary) return;
     const content = `User: ${userMessage.slice(0, 200)}. Assistant: ${assistantSummary.slice(0, 300)}.`;
-    writeEvent(content, 0.4);
+    await writeEvent(content, 0.4);
     recordPattern({
         type: 'turn',
         name: 'conversation_turn',
@@ -340,8 +340,8 @@ export function consolidateTurn(
             }
         }
     }
-    const items = loadMemories();
+    const items = await loadMemories();
     if (items.length > MAX_MEMORY_ITEMS) {
-        garbageCollect(MAX_MEMORY_ITEMS, MAX_MEMORY_AGE_DAYS);
+        await garbageCollect(MAX_MEMORY_ITEMS, MAX_MEMORY_AGE_DAYS);
     }
 }

@@ -1,5 +1,9 @@
 /**
  * storage/fileBackend.ts - File-backed storage implementations.
+ *
+ * All methods are async to match the storage interface contract.
+ * Internally uses synchronous fs operations (wrapped in async)
+ * for zero-overhead local usage.
  */
 
 import * as fs from 'fs';
@@ -57,16 +61,16 @@ export class FileSessionStore implements SessionStore {
         return path.join(this._dir, `${sessionId}.json`);
     }
 
-    get(sessionId: string): Record<string, any> | null {
+    async get(sessionId: string): Promise<Record<string, any> | null> {
         return jsonRead(this._path(sessionId));
     }
 
-    put(sessionId: string, data: Record<string, any>): void {
+    async put(sessionId: string, data: Record<string, any>): Promise<void> {
         ensureDir(this._dir);
         jsonWrite(this._path(sessionId), data);
     }
 
-    listIds(): string[] {
+    async listIds(): Promise<string[]> {
         const ids = new Set<string>();
         if (fs.existsSync(this._dir)) {
             for (const f of fs.readdirSync(this._dir)) {
@@ -76,7 +80,7 @@ export class FileSessionStore implements SessionStore {
         return [...ids].sort();
     }
 
-    listSummaries(limit: number = 20): Record<string, any>[] {
+    async listSummaries(limit: number = 20): Promise<Record<string, any>[]> {
         const entries: Record<string, any>[] = [];
         const seen = new Set<string>();
         if (fs.existsSync(this._dir)) {
@@ -113,12 +117,12 @@ export class FileMemoryStore implements MemoryStore {
         this._path = memoryFile ?? DEFAULT_MEMORY_FILE;
     }
 
-    load(): Record<string, any>[] {
+    async load(): Promise<Record<string, any>[]> {
         const data = jsonRead(this._path);
         return Array.isArray(data) ? data : [];
     }
 
-    save(items: Record<string, any>[]): void {
+    async save(items: Record<string, any>[]): Promise<void> {
         jsonWrite(this._path, items);
     }
 }
@@ -168,7 +172,7 @@ export class FileSkillStore implements SkillStore {
         };
     }
 
-    listSkills(): string[] {
+    async listSkills(): Promise<string[]> {
         this._cache = {};
         if (!fs.existsSync(this._dir)) return [];
         const out: string[] = [];
@@ -185,9 +189,9 @@ export class FileSkillStore implements SkillStore {
         return out;
     }
 
-    getSkill(name: string): Record<string, any> | null {
+    async getSkill(name: string): Promise<Record<string, any> | null> {
         if (!Object.keys(this._cache).length && fs.existsSync(this._dir)) {
-            this.listSkills();
+            await this.listSkills();
         }
         return this._cache[name] ?? null;
     }
@@ -208,14 +212,14 @@ export class FileContextStore implements ContextStore {
         return path.join(this._dir, `${sessionId}.json`);
     }
 
-    get(sessionId: string): Record<string, any> | null {
+    async get(sessionId: string): Promise<Record<string, any> | null> {
         const data = jsonRead(this._path(sessionId));
         return data && typeof data === 'object' && !Array.isArray(data)
             ? data
             : null;
     }
 
-    set(sessionId: string, data: Record<string, any>): void {
+    async set(sessionId: string, data: Record<string, any>): Promise<void> {
         jsonWrite(this._path(sessionId), data);
     }
 }

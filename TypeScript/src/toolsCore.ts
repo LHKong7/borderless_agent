@@ -492,7 +492,7 @@ export function runReadEmail(
     );
 }
 
-export function runSkill(skillName: string): string {
+export async function runSkill(skillName: string): Promise<string> {
     if (LOADED_SKILLS.has(skillName)) {
         return (
             `(Skill '${skillName}' is already loaded for this task. ` +
@@ -501,9 +501,9 @@ export function runSkill(skillName: string): string {
         );
     }
     LOADED_SKILLS.add(skillName);
-    const content = SKILLS.getSkillContent(skillName);
+    const content = await SKILLS.getSkillContent(skillName);
     if (content === null) {
-        const available = SKILLS.listSkills().join(', ') || 'none';
+        const available = (await SKILLS.listSkills()).join(', ') || 'none';
         return `Error: Unknown skill '${skillName}'. Available: ${available}`;
     }
     return `<skill-loaded name="${skillName}">
@@ -677,7 +677,7 @@ export function executeTool(name: string, args: Record<string, any>): string {
             // runTask is async; return a placeholder — callers should use executeToolAsync
             return '(Task tool requires async execution)';
         case 'Skill':
-            return runSkill(args.skill);
+            return '(Skill tool requires async execution — use executeToolAsync)';
         default:
             return `Unknown tool: ${name}`;
     }
@@ -699,6 +699,9 @@ export async function executeToolAsync(
     }
     if (name === 'WebFetch') {
         return runWebFetch(args.url ?? '', args.prompt ?? '');
+    }
+    if (name === 'Skill') {
+        return runSkill(args.skill);
     }
     return executeTool(name, args);
 }

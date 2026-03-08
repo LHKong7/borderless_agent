@@ -13,8 +13,8 @@ import { SKILLS_DIR } from './config';
 // ---------------------------------------------------------------------------
 
 export interface SkillStore {
-    listSkills(): string[];
-    getSkill(name: string): Record<string, any> | null;
+    listSkills(): Promise<string[]>;
+    getSkill(name: string): Promise<Record<string, any> | null>;
 }
 
 // ---------------------------------------------------------------------------
@@ -94,17 +94,17 @@ export class SkillLoader {
         }
     }
 
-    getDescriptions(): string {
+    async getDescriptions(): Promise<string> {
         if (this._store) {
-            const names = this._store.listSkills();
+            const names = await this._store.listSkills();
             if (!names.length) return '(no skills available)';
-            return names
-                .map((name) => {
-                    const skill = this._store!.getSkill(name);
-                    const desc = skill?.description ?? '';
-                    return `- ${name}: ${desc}`;
-                })
-                .join('\n');
+            const lines: string[] = [];
+            for (const name of names) {
+                const skill = await this._store.getSkill(name);
+                const desc = skill?.description ?? '';
+                lines.push(`- ${name}: ${desc}`);
+            }
+            return lines.join('\n');
         }
         if (!Object.keys(this.skills).length) return '(no skills available)';
         return Object.entries(this.skills)
@@ -112,9 +112,9 @@ export class SkillLoader {
             .join('\n');
     }
 
-    getSkillContent(name: string): string | null {
+    async getSkillContent(name: string): Promise<string | null> {
         if (this._store) {
-            const skill = this._store.getSkill(name);
+            const skill = await this._store.getSkill(name);
             if (!skill) return null;
             let content = `# Skill: ${skill.name}\n\n${skill.body ?? ''}`;
             const resources: string[] = [];
@@ -166,7 +166,7 @@ export class SkillLoader {
         return content;
     }
 
-    listSkills(): string[] {
+    async listSkills(): Promise<string[]> {
         if (this._store) return this._store.listSkills();
         return Object.keys(this.skills);
     }

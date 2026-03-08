@@ -110,6 +110,7 @@ class AgentConfig:
     max_tool_rounds: int = 20
     approval_callback: Optional[Callable[[str, Dict[str, Any]], bool]] = None
     sandbox: Any = None  # SandboxConfig from sandbox.py
+    mcp_servers: Optional[List[Any]] = None  # List[MCPServerConfig] from mcp_client.py
 
 
 # ---------------------------------------------------------------------------

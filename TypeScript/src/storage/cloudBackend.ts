@@ -2,6 +2,7 @@
  * storage/cloudBackend.ts - Cloud-backed storage (S3-compatible).
  *
  * Uses @aws-sdk/client-s3; set AGENT_STORAGE_BACKEND=cloud and configure bucket + credentials.
+ * All methods are natively async — no sync stubs.
  */
 
 import {
@@ -88,12 +89,7 @@ export class CloudSessionStore implements SessionStore {
         return `${SESSIONS_PREFIX}${sessionId}`;
     }
 
-    get(sessionId: string): Record<string, any> | null {
-        // Sync wrapper — callers should await if needed
-        return null; // Placeholder: S3 ops are async
-    }
-
-    async getAsync(sessionId: string): Promise<Record<string, any> | null> {
+    async get(sessionId: string): Promise<Record<string, any> | null> {
         try {
             const resp = await this._client.send(
                 new GetObjectCommand({ Bucket: this._bucket, Key: this._key(sessionId) }),
@@ -105,8 +101,8 @@ export class CloudSessionStore implements SessionStore {
         }
     }
 
-    put(sessionId: string, data: Record<string, any>): void {
-        this._client.send(
+    async put(sessionId: string, data: Record<string, any>): Promise<void> {
+        await this._client.send(
             new PutObjectCommand({
                 Bucket: this._bucket,
                 Key: this._key(sessionId),
@@ -116,11 +112,7 @@ export class CloudSessionStore implements SessionStore {
         );
     }
 
-    listIds(): string[] {
-        return []; // Async — use listIdsAsync
-    }
-
-    async listIdsAsync(): Promise<string[]> {
+    async listIds(): Promise<string[]> {
         const ids: string[] = [];
         let continuationToken: string | undefined;
         do {
@@ -142,15 +134,11 @@ export class CloudSessionStore implements SessionStore {
         return ids.sort();
     }
 
-    listSummaries(limit: number = 20): Record<string, any>[] {
-        return []; // Async — use listSummariesAsync
-    }
-
-    async listSummariesAsync(limit: number = 20): Promise<Record<string, any>[]> {
-        const ids = await this.listIdsAsync();
+    async listSummaries(limit: number = 20): Promise<Record<string, any>[]> {
+        const ids = await this.listIds();
         const entries: Record<string, any>[] = [];
         for (const sid of ids) {
-            const data = await this.getAsync(sid);
+            const data = await this.get(sid);
             if (!data) continue;
             entries.push({
                 id: sid,
@@ -183,11 +171,7 @@ export class CloudMemoryStore implements MemoryStore {
         }
     }
 
-    load(): Record<string, any>[] {
-        return []; // Async — use loadAsync
-    }
-
-    async loadAsync(): Promise<Record<string, any>[]> {
+    async load(): Promise<Record<string, any>[]> {
         try {
             const resp = await this._client.send(
                 new GetObjectCommand({ Bucket: this._bucket, Key: MEMORY_KEY }),
@@ -200,8 +184,8 @@ export class CloudMemoryStore implements MemoryStore {
         }
     }
 
-    save(items: Record<string, any>[]): void {
-        this._client.send(
+    async save(items: Record<string, any>[]): Promise<void> {
+        await this._client.send(
             new PutObjectCommand({
                 Bucket: this._bucket,
                 Key: MEMORY_KEY,
@@ -231,11 +215,7 @@ export class CloudSkillStore implements SkillStore {
         }
     }
 
-    listSkills(): string[] {
-        return []; // Async — use listSkillsAsync
-    }
-
-    async listSkillsAsync(): Promise<string[]> {
+    async listSkills(): Promise<string[]> {
         const names: string[] = [];
         let continuationToken: string | undefined;
         do {
@@ -257,11 +237,7 @@ export class CloudSkillStore implements SkillStore {
         return names.sort();
     }
 
-    getSkill(name: string): Record<string, any> | null {
-        return null; // Async — use getSkillAsync
-    }
-
-    async getSkillAsync(name: string): Promise<Record<string, any> | null> {
+    async getSkill(name: string): Promise<Record<string, any> | null> {
         const key = `${SKILLS_PREFIX}${name}`;
         try {
             const resp = await this._client.send(
@@ -298,11 +274,7 @@ export class CloudContextStore implements ContextStore {
         return `${CONTEXT_PREFIX}${sessionId}`;
     }
 
-    get(sessionId: string): Record<string, any> | null {
-        return null; // Async — use getAsync
-    }
-
-    async getAsync(sessionId: string): Promise<Record<string, any> | null> {
+    async get(sessionId: string): Promise<Record<string, any> | null> {
         try {
             const resp = await this._client.send(
                 new GetObjectCommand({ Bucket: this._bucket, Key: this._key(sessionId) }),
@@ -317,8 +289,8 @@ export class CloudContextStore implements ContextStore {
         }
     }
 
-    set(sessionId: string, data: Record<string, any>): void {
-        this._client.send(
+    async set(sessionId: string, data: Record<string, any>): Promise<void> {
+        await this._client.send(
             new PutObjectCommand({
                 Bucket: this._bucket,
                 Key: this._key(sessionId),

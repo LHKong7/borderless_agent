@@ -99,14 +99,14 @@ export class SessionManager {
         return this._sessions.get(this._activeSessionId) ?? null;
     }
 
-    createSession(options?: {
+    async createSession(options?: {
         context?: Record<string, any>;
         loadConversationHistory?: boolean;
-    }): Session {
+    }): Promise<Session> {
         const sessionId = uuidv4();
         let history: Record<string, any>[] = [];
         if (options?.loadConversationHistory) {
-            const last = this._loadLatestFromDisk();
+            const last = await this._loadLatestFromDisk();
             if (last) {
                 history = (last.history ?? []).slice(0, 50);
             }
@@ -119,16 +119,16 @@ export class SessionManager {
         });
         this._sessions.set(sessionId, session);
         this._activeSessionId = sessionId;
-        this.saveSession(session);
+        await this.saveSession(session);
         return session;
     }
 
-    restoreSession(sessionId: string): Session | null {
+    async restoreSession(sessionId: string): Promise<Session | null> {
         if (this._sessions.has(sessionId)) {
             this._activeSessionId = sessionId;
             return this._sessions.get(sessionId)!;
         }
-        const data = this._loadFromDisk(sessionId);
+        const data = await this._loadFromDisk(sessionId);
         if (!data) return null;
         const session = Session.fromDict(data);
         this._sessions.set(sessionId, session);
@@ -136,7 +136,7 @@ export class SessionManager {
         return session;
     }
 
-    setActiveSession(sessionId: string): Session | null {
+    async setActiveSession(sessionId: string): Promise<Session | null> {
         if (!this._sessions.has(sessionId)) {
             return this.restoreSession(sessionId);
         }
@@ -169,7 +169,7 @@ export class SessionManager {
         active.context.recent_files = recent.slice(0, 100);
     }
 
-    saveSession(session: Session): void {
+    async saveSession(session: Session): Promise<void> {
         session.updatedAt = Date.now() / 1000;
         let data = session.toDict();
         try {
@@ -179,7 +179,7 @@ export class SessionManager {
             // memoryCore not available
         }
         if (this._store) {
-            this._store.put(session.id, data);
+            await this._store.put(session.id, data);
             return;
         }
         this._ensureStorageDir();
@@ -187,12 +187,12 @@ export class SessionManager {
         fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
     }
 
-    saveActive(): void {
+    async saveActive(): Promise<void> {
         const s = this.activeSession;
-        if (s) this.saveSession(s);
+        if (s) await this.saveSession(s);
     }
 
-    private _loadFromDisk(sessionId: string): Record<string, any> | null {
+    private async _loadFromDisk(sessionId: string): Promise<Record<string, any> | null> {
         if (this._store) return this._store.get(sessionId);
         const filePath = this._sessionFile(sessionId);
         if (!fs.existsSync(filePath)) return null;
@@ -203,9 +203,9 @@ export class SessionManager {
         }
     }
 
-    private _loadLatestFromDisk(): Record<string, any> | null {
+    private async _loadLatestFromDisk(): Promise<Record<string, any> | null> {
         if (this._store) {
-            const summaries = this._store.listSummaries(1);
+            const summaries = await this._store.listSummaries(1);
             if (!summaries.length) return null;
             return this._store.get(summaries[0].id);
         }
@@ -230,10 +230,10 @@ export class SessionManager {
         return latest?.data ?? null;
     }
 
-    listSessionIds(): string[] {
+    async listSessionIds(): Promise<string[]> {
         const ids = new Set(this._sessions.keys());
         if (this._store) {
-            for (const id of this._store.listIds()) ids.add(id);
+            for (const id of await this._store.listIds()) ids.add(id);
         } else if (fs.existsSync(this._storageDir)) {
             for (const f of fs.readdirSync(this._storageDir)) {
                 if (f.endsWith('.json')) ids.add(path.basename(f, '.json'));
@@ -242,7 +242,7 @@ export class SessionManager {
         return [...ids].sort();
     }
 
-    listSessionsSummary(limit: number = 20): Record<string, any>[] {
+    async listSessionsSummary(limit: number = 20): Promise<Record<string, any>[]> {
         if (this._store) return this._store.listSummaries(limit);
         const entries: Record<string, any>[] = [];
         const seen = new Set<string>();
@@ -284,16 +284,16 @@ export class SessionManager {
         return entries.slice(0, limit);
     }
 
-    archiveSession(sessionId: string): boolean {
+    async archiveSession(sessionId: string): Promise<boolean> {
         let s = this._sessions.get(sessionId) ?? null;
         if (!s) {
-            const d = this._loadFromDisk(sessionId);
+            const d = await this._loadFromDisk(sessionId);
             if (d) s = Session.fromDict(d);
         }
         if (!s) return false;
         s.state = SESSION_STATE_ARCHIVED;
         this._sessions.set(sessionId, s);
-        this.saveSession(s);
+        await this.saveSession(s);
         if (this._activeSessionId === sessionId) {
             this._activeSessionId = null;
         }

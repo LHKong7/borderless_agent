@@ -72,11 +72,11 @@ async function chooseSession(
         choice = choice.toLowerCase();
 
         if (choice === 'n') {
-            sessionMgr.createSession({ context: { started: true } });
+            await sessionMgr.createSession({ context: { started: true } });
             return;
         }
         if (choice === 'l') {
-            const summaries = sessionMgr.listSessionsSummary(20);
+            const summaries = await sessionMgr.listSessionsSummary(20);
             if (!summaries.length) {
                 console.log('  No saved sessions.');
             } else {
@@ -92,7 +92,7 @@ async function chooseSession(
         }
         if (choice.startsWith('r ')) {
             const sid = choice.slice(2).trim();
-            if (sessionMgr.restoreSession(sid)) return;
+            if (await sessionMgr.restoreSession(sid)) return;
             console.log(`  Session not found: ${sid}`);
             continue;
         }
@@ -132,14 +132,14 @@ export async function runTurn(options: {
     ) {
         if (history.length) {
             const summary = await summarizeRounds(history);
-            if (summary) writeInsight(summary, 0.5);
+            if (summary) await writeInsight(summary, 0.5);
         }
         history.length = 0;
         lifecycle.resetSession();
     }
 
-    const memoryTuples = retrieve(userInput, 5);
-    const ragLines = memoryTuples.map((m) => m[0]).filter(Boolean);
+    const memoryTuples = await retrieve(userInput, 5);
+    const ragLines = memoryTuples.map((m: [string, number, Record<string, any>]) => m[0]).filter(Boolean);
 
     if (contextEnabled()) {
         history = selectHistory(history, userInput, budget.history, MAX_HISTORY_TURNS);
@@ -160,8 +160,8 @@ export async function runTurn(options: {
         const cached = getCachedReply(sessionId, userInput, history);
         if (cached) {
             history.push({ role: 'assistant', content: cached.text });
-            consolidateTurn(userInput, cached.text);
-            syncSession(sessionMgr, lifecycle, history);
+            await consolidateTurn(userInput, cached.text);
+            await syncSession(sessionMgr, lifecycle, history);
             return { history, lastAssistantText: cached.text };
         }
     }
@@ -224,13 +224,13 @@ export async function runTurn(options: {
             );
         }
 
-        syncSession(sessionMgr, lifecycle, history);
+        await syncSession(sessionMgr, lifecycle, history);
     } catch (e: any) {
         logger.error(`Error: ${e}`);
         const errMsg = String(e).slice(0, 500);
         history.push({ role: 'assistant', content: `[Error: ${errMsg}]` });
         lastAssistantText = `[Error: ${errMsg}]`;
-        syncSession(sessionMgr, lifecycle, history);
+        await syncSession(sessionMgr, lifecycle, history);
     }
 
     const turnMs = Date.now() - turnStart;
@@ -271,16 +271,16 @@ export class Agent {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-function syncSession(
+async function syncSession(
     sessionMgr: SessionManager,
     lifecycle: LifecycleManager,
     history: Record<string, any>[],
-): void {
+): Promise<void> {
     const active = sessionMgr.getActiveSession();
     if (active) {
         active.history = history;
         active.context.conversation_summary = lifecycle.getConversationSummary();
-        sessionMgr.saveActive();
+        await sessionMgr.saveActive();
     }
     if (contextEnabled() && history.length >= 20) {
         // Fire and forget summary
@@ -305,7 +305,7 @@ export async function main(): Promise<void> {
     console.log(
         `General-purpose Agent v4 (Skills + Memory + Context) - ${WORKDIR}`,
     );
-    console.log(`Skills: ${SKILLS.listSkills().join(', ') || 'none'}`);
+    console.log(`Skills: ${(await SKILLS.listSkills()).join(', ') || 'none'}`);
     console.log(`Agent types: ${Object.keys(AGENT_TYPES).join(', ')}`);
     console.log("Type 'exit' to quit.\n");
 
@@ -328,7 +328,7 @@ export async function main(): Promise<void> {
                 break;
             }
             if (!userInput || ['exit', 'quit', 'q'].includes(userInput.toLowerCase())) {
-                sessionMgr.saveActive();
+                await sessionMgr.saveActive();
                 break;
             }
             const result = await runTurn({

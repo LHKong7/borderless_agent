@@ -181,6 +181,41 @@ class AgentBuilder:
         self._config.approval_callback = callback
         return self
 
+    # ---- MCP ----
+
+    def add_mcp_server(
+        self,
+        name: str,
+        transport: str = "stdio",
+        command: Optional[str] = None,
+        args: Optional[List[str]] = None,
+        env: Optional[Dict[str, str]] = None,
+        url: Optional[str] = None,
+    ) -> "AgentBuilder":
+        """Add an MCP server to connect to when the agent is built."""
+        from mcp_client import MCPServerConfig
+
+        if self._config.mcp_servers is None:
+            self._config.mcp_servers = []
+        self._config.mcp_servers.append(
+            MCPServerConfig(
+                name=name,
+                transport=transport,
+                command=command,
+                args=args,
+                env=env,
+                url=url,
+            )
+        )
+        return self
+
+    def add_mcp_servers(self, configs: list) -> "AgentBuilder":
+        """Add multiple MCP servers at once."""
+        if self._config.mcp_servers is None:
+            self._config.mcp_servers = []
+        self._config.mcp_servers.extend(configs)
+        return self
+
     # ---- Sandbox ----
 
     def set_sandbox(
