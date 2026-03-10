@@ -252,7 +252,27 @@ detailed instructions and access to resources.""",
     },
 }
 
-ALL_TOOLS: List[Dict[str, Any]] = BASE_TOOLS + [TASK_TOOL, SKILL_TOOL]
+ASK_USER_TOOL: Dict[str, Any] = {
+    "name": "ask_user",
+    "description": (
+        "Ask the user a question and wait for their response. "
+        "Use this when you need clarification, additional information, "
+        "confirmation on an important decision, or when the task is ambiguous. "
+        "Do NOT use this for trivial questions you can resolve yourself."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "question": {
+                "type": "string",
+                "description": "The question to ask the user",
+            },
+        },
+        "required": ["question"],
+    },
+}
+
+ALL_TOOLS: List[Dict[str, Any]] = BASE_TOOLS + [TASK_TOOL, SKILL_TOOL, ASK_USER_TOOL]
 
 # Safety limit to prevent infinite tool-use loops
 MAX_TOOL_ROUNDS = 20
@@ -262,6 +282,15 @@ LOADED_SKILLS: set[str] = set()
 
 # Approval callback for Executor: (tool_name, tool_args) -> bool. Set to None to auto-approve (e.g. tests).
 _executor_approval_callback = None
+
+# Human-in-the-loop callback for CLI mode: (question) -> str
+_human_input_callback: Optional[Callable[[str], str]] = None
+
+
+def set_human_input_callback(cb: Optional[Callable[[str], str]]) -> None:
+    """Set a callback for human-in-the-loop interaction. None = use stdin fallback."""
+    global _human_input_callback
+    _human_input_callback = cb
 
 
 def set_executor_approval_callback(callback):
@@ -500,6 +529,22 @@ You have now loaded this skill. Use the knowledge above to complete the user's t
 Do NOT call the Skill tool again for this task; respond with your full answer in natural language."""
 
 
+def run_ask_user(question: str) -> str:
+    """Ask the user a question and return their answer."""
+    if _human_input_callback is not None:
+        try:
+            answer = _human_input_callback(question)
+            return answer or "(User provided no response)"
+        except Exception as e:
+            return f"[Human input error] {e}"
+    # Fallback: use stdin for CLI mode
+    try:
+        answer = input(f"\n🤖 Agent asks: {question}\nYour answer: ").strip()
+        return answer or "(User provided no response)"
+    except (EOFError, KeyboardInterrupt):
+        return "(User input cancelled)"
+
+
 def _tool_calls_to_msg_shape(tool_calls: List[ToolCall]) -> List[Any]:
     """Convert List[ToolCall] to message shape used by run_task loop (id, function.name, function.arguments string)."""
     return [
@@ -659,6 +704,8 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
         )
     if name == "WebFetch":
         return run_web_fetch(args.get("url", ""), args.get("prompt", ""))
+    if name == "ask_user":
+        return run_ask_user(args.get("question", ""))
     return f"Unknown tool: {name}"
 
 

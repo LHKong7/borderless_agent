@@ -23,6 +23,8 @@ export interface LLMResponse {
     toolCalls: ToolCall[];
     usage: Record<string, number>;
     model: string;
+    /** Extended thinking / reasoning content from models that support it. */
+    thinking?: string | null;
 }
 
 export interface ChatMessage {
@@ -64,6 +66,33 @@ function usageFromOpenAI(usage: any): Record<string, number> {
         cache_creation_input_tokens: usage?.cache_creation_input_tokens ?? 0,
         cache_read_input_tokens: usage?.cache_read_input_tokens ?? 0,
     };
+}
+
+/**
+ * Extract thinking/reasoning content from an OpenAI-compatible message.
+ * Supports:
+ *  - Anthropic-style: msg.thinking (string)
+ *  - Content blocks: msg.content[] with type="thinking"
+ *  - OpenAI reasoning: msg.reasoning_content or msg.reasoning
+ */
+function thinkingFromMessage(msg: any): string | null {
+    if (!msg) return null;
+    // Anthropic direct field
+    if (typeof msg.thinking === 'string' && msg.thinking) return msg.thinking;
+    // OpenAI reasoning_content (o-series models)
+    if (typeof msg.reasoning_content === 'string' && msg.reasoning_content) return msg.reasoning_content;
+    if (typeof msg.reasoning === 'string' && msg.reasoning) return msg.reasoning;
+    // Content blocks array (Anthropic messages API style)
+    if (Array.isArray(msg.content)) {
+        const parts: string[] = [];
+        for (const block of msg.content) {
+            if (block?.type === 'thinking' && typeof block.thinking === 'string') {
+                parts.push(block.thinking);
+            }
+        }
+        if (parts.length) return parts.join('\n');
+    }
+    return null;
 }
 
 function toolCallsFromOpenAIMessage(msg: any): ToolCall[] {
@@ -180,23 +209,56 @@ export class OpenAIProvider implements LLMProvider {
     }
 
     private async _chatNonStream(kwargs: any): Promise<LLMResponse> {
-        const resp = await this.openaiClient.chat.completions.create(kwargs);
-        const msg = (resp as any).choices[0].message;
-        const usage = usageFromOpenAI((resp as any).usage);
-        const toolCalls = toolCallsFromOpenAIMessage(msg);
-        return {
-            content: (msg.content ?? '').trim() || null,
-            toolCalls,
-            usage,
-            model: this._model,
-        };
+        const MAX_RETRIES = 3;
+        for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+            try {
+                const resp = await this.openaiClient.chat.completions.create(kwargs);
+                const msg = (resp as any).choices[0].message;
+                const usage = usageFromOpenAI((resp as any).usage);
+                const toolCalls = toolCallsFromOpenAIMessage(msg);
+                const thinking = thinkingFromMessage(msg);
+                return {
+                    content: (msg.content ?? '').trim() || null,
+                    toolCalls,
+                    usage,
+                    model: this._model,
+                    thinking,
+                };
+            } catch (e: any) {
+                const status = e?.status ?? e?.response?.status;
+                const retryable = [429, 500, 502, 503].includes(status);
+                if (attempt < MAX_RETRIES && retryable) {
+                    await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt - 1)));
+                    continue;
+                }
+                throw e;
+            }
+        }
+        throw new Error('LLM call failed after retries');
     }
 
     private async *_chatStream(kwargs: any): AsyncGenerator<LLMResponse> {
         kwargs.stream = true;
-        const stream = await this.openaiClient.chat.completions.create(kwargs);
+        let stream: any;
+        const MAX_RETRIES = 3;
+        for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+            try {
+                stream = await this.openaiClient.chat.completions.create(kwargs);
+                break;
+            } catch (e: any) {
+                const status = e?.status ?? e?.response?.status;
+                const retryable = [429, 500, 502, 503].includes(status);
+                if (attempt < MAX_RETRIES && retryable) {
+                    await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt - 1)));
+                    continue;
+                }
+                throw e;
+            }
+        }
+        if (!stream) throw new Error('LLM stream failed after retries');
 
         const contentParts: string[] = [];
+        const thinkingParts: string[] = [];
         const toolCallsAccum: { id: string; name: string; arguments: string }[] = [];
         let usage: Record<string, number> = {};
 
@@ -211,6 +273,13 @@ export class OpenAIProvider implements LLMProvider {
             const delta = choice?.delta;
             if (!delta) continue;
 
+            // Accumulate thinking/reasoning deltas
+            const thinkingDelta: string | undefined =
+                delta?.thinking ?? delta?.reasoning_content ?? delta?.reasoning;
+            if (thinkingDelta) {
+                thinkingParts.push(thinkingDelta);
+            }
+
             const part: string | undefined = delta?.content;
             if (part) {
                 contentParts.push(part);
@@ -224,7 +293,7 @@ export class OpenAIProvider implements LLMProvider {
 
             for (const tc of delta?.tool_calls ?? []) {
                 const idx = tc?.index;
-                if (idx == null) continue;
+                if (idx == null || idx > 100) continue;
                 while (toolCallsAccum.length <= idx) {
                     toolCallsAccum.push({ id: '', name: '', arguments: '' });
                 }
@@ -256,11 +325,13 @@ export class OpenAIProvider implements LLMProvider {
             }
         }
 
+        const fullThinking = thinkingParts.join('') || null;
         yield {
             content: fullContent || null,
             toolCalls: toolCallsOut,
             usage,
             model: this._model,
+            thinking: fullThinking,
         };
     }
 }

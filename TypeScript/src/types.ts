@@ -132,6 +132,12 @@ export interface AgentConfig {
     maxToolRounds?: number;
     /** Callback for executor approval. Return true to approve. */
     approvalCallback?: (toolName: string, args: Record<string, any>) => Promise<boolean> | boolean;
+    /**
+     * Callback for human-in-the-loop interaction.
+     * Called when the agent uses the `ask_user` tool to ask the user a question mid-task.
+     * Receives the question string and should return the user's answer.
+     */
+    humanInputCallback?: (question: string) => Promise<string> | string;
     /** Sandbox configuration for isolating tool execution. */
     sandbox?: SandboxConfig;
     /** MCP server configurations to connect to. */

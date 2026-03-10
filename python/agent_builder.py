@@ -181,6 +181,18 @@ class AgentBuilder:
         self._config.approval_callback = callback
         return self
 
+    def set_human_input_callback(
+        self, callback: Callable[[str], str]
+    ) -> "AgentBuilder":
+        """Set callback for human-in-the-loop interaction.
+
+        When the agent needs clarification or input from the user mid-task,
+        it calls the ``ask_user`` tool which invokes this callback.
+        The callback receives the question string and should return the user's answer.
+        """
+        self._config.human_input_callback = callback
+        return self
+
     # ---- MCP ----
 
     def add_mcp_server(

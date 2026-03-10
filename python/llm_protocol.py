@@ -38,6 +38,7 @@ class LLMResponse:
     tool_calls: List[ToolCall]
     usage: Dict[str, int]  # e.g. prompt_tokens, completion_tokens
     model: str
+    thinking: Optional[str] = None  # Extended thinking / reasoning content
 
 
 # -----------------------------------------------------------------------------
@@ -86,6 +87,45 @@ def _usage_from_openai(usage: Any) -> Dict[str, int]:
         "cache_creation_input_tokens": getattr(usage, "cache_creation_input_tokens", 0) or 0,
         "cache_read_input_tokens": getattr(usage, "cache_read_input_tokens", 0) or 0,
     }
+
+
+def _thinking_from_message(msg: Any) -> Optional[str]:
+    """Extract thinking/reasoning content from an OpenAI-compatible message.
+
+    Supports:
+      - Anthropic-style: msg.thinking (string)
+      - Content blocks: msg.content[] with type="thinking"
+      - OpenAI reasoning: msg.reasoning_content or msg.reasoning
+    """
+    if msg is None:
+        return None
+    # Anthropic direct field
+    thinking = getattr(msg, "thinking", None)
+    if isinstance(thinking, str) and thinking:
+        return thinking
+    # OpenAI reasoning_content (o-series models)
+    rc = getattr(msg, "reasoning_content", None)
+    if isinstance(rc, str) and rc:
+        return rc
+    reasoning = getattr(msg, "reasoning", None)
+    if isinstance(reasoning, str) and reasoning:
+        return reasoning
+    # Content blocks array (Anthropic messages API style)
+    content = getattr(msg, "content", None)
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "thinking":
+                t = block.get("thinking", "")
+                if t:
+                    parts.append(t)
+            elif hasattr(block, "type") and getattr(block, "type", None) == "thinking":
+                t = getattr(block, "thinking", "")
+                if t:
+                    parts.append(t)
+        if parts:
+            return "\n".join(parts)
+    return None
 
 
 def _tool_calls_from_openai_message(msg: Any) -> List[ToolCall]:
@@ -177,22 +217,64 @@ class OpenAIProvider:
 
         if stream:
             return self._chat_stream(kwargs)
-        resp = self._openai_client.chat.completions.create(**kwargs)
-        msg = resp.choices[0].message
-        usage = _usage_from_openai(getattr(resp, "usage", None))
-        tool_calls = _tool_calls_from_openai_message(msg)
-        return LLMResponse(
-            content=(msg.content or "").strip() or None,
-            tool_calls=tool_calls,
-            usage=usage,
-            model=self._model,
-        )
+        return self._chat_non_stream(kwargs)
+
+    # #5: Non-stream with retry
+    def _chat_non_stream(self, kwargs: Dict[str, Any]) -> LLMResponse:
+        MAX_RETRIES = 3
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                resp = self._openai_client.chat.completions.create(**kwargs)
+                msg = resp.choices[0].message
+                usage = _usage_from_openai(getattr(resp, "usage", None))
+                tool_calls = _tool_calls_from_openai_message(msg)
+                thinking = _thinking_from_message(msg)
+                return LLMResponse(
+                    content=(msg.content or "").strip() or None,
+                    tool_calls=tool_calls,
+                    usage=usage,
+                    model=self._model,
+                    thinking=thinking,
+                )
+            except Exception as e:
+                status = getattr(e, 'status_code', None) or getattr(e, 'status', None)
+                if status is None:
+                    r = getattr(e, 'response', None)
+                    if r is not None:
+                        status = getattr(r, 'status_code', None)
+                retryable = status in {429, 500, 502, 503} if status else False
+                if attempt < MAX_RETRIES and retryable:
+                    import time
+                    time.sleep(2 ** (attempt - 1))
+                    continue
+                raise
 
     def _chat_stream(self, kwargs: Dict[str, Any]) -> Iterator[LLMResponse]:
         kwargs = dict(kwargs)
         kwargs["stream"] = True
-        stream = self._openai_client.chat.completions.create(**kwargs)
+        # #5: Retry on initial stream connection
+        MAX_RETRIES = 3
+        stream = None
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                stream = self._openai_client.chat.completions.create(**kwargs)
+                break
+            except Exception as e:
+                status = getattr(e, 'status_code', None) or getattr(e, 'status', None)
+                if status is None:
+                    r = getattr(e, 'response', None)
+                    if r is not None:
+                        status = getattr(r, 'status_code', None)
+                retryable = status in {429, 500, 502, 503} if status else False
+                if attempt < MAX_RETRIES and retryable:
+                    import time
+                    time.sleep(2 ** (attempt - 1))
+                    continue
+                raise
+        if stream is None:
+            raise RuntimeError("LLM stream failed after retries")
         content_parts: List[str] = []
+        thinking_parts: List[str] = []
         tool_calls_accum: List[Dict[str, Any]] = []
         usage: Dict[str, int] = {}
 
@@ -205,13 +287,21 @@ class OpenAIProvider:
             delta = getattr(choice, "delta", None)
             if delta is None:
                 continue
+            # Accumulate thinking/reasoning deltas
+            thinking_delta = (
+                getattr(delta, "thinking", None)
+                or getattr(delta, "reasoning_content", None)
+                or getattr(delta, "reasoning", None)
+            )
+            if thinking_delta and isinstance(thinking_delta, str):
+                thinking_parts.append(thinking_delta)
             part = getattr(delta, "content", None)
             if part:
                 content_parts.append(part)
                 yield LLMResponse(content=part, tool_calls=[], usage={}, model=self._model)
             for tc in getattr(delta, "tool_calls", None) or []:
                 idx = getattr(tc, "index", None)
-                if idx is None:
+                if idx is None or idx > 100:  # #25: index bounds check
                     continue
                 while len(tool_calls_accum) <= idx:
                     tool_calls_accum.append({"id": "", "name": "", "arguments": ""})
@@ -242,9 +332,11 @@ class OpenAIProvider:
                 tool_calls_out.append(
                     ToolCall(id=acc.get("id", ""), name=acc.get("name", ""), arguments=arguments)
                 )
+        full_thinking = "".join(thinking_parts) or None
         yield LLMResponse(
             content=full_content or None,
             tool_calls=tool_calls_out,
             usage=usage,
             model=self._model,
+            thinking=full_thinking,
         )

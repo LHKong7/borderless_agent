@@ -137,6 +137,18 @@ export class AgentBuilder {
         return this;
     }
 
+    /**
+     * Set callback for human-in-the-loop interaction.
+     * When the agent needs clarification or input from the user mid-task,
+     * it calls the `ask_user` tool which invokes this callback.
+     */
+    setHumanInputCallback(
+        cb: (question: string) => Promise<string> | string,
+    ): this {
+        this._config.humanInputCallback = cb;
+        return this;
+    }
+
     // ---- MCP ----
 
     /** Add an MCP server to connect to when the agent is built. */

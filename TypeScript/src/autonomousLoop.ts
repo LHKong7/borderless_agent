@@ -127,6 +127,19 @@ function parseEvaluation(text: string): EvalResult {
         }
     }
 
+    // #20: Try "score: N" format
+    const scoreMatch = text.match(/score\s*[:\-=]\s*(\d+)/i);
+    if (scoreMatch) {
+        const s = parseInt(scoreMatch[1], 10);
+        if (!isNaN(s)) {
+            return {
+                score: Math.max(1, Math.min(10, s)),
+                reasoning: text.slice(0, 200),
+                improvements: [],
+            };
+        }
+    }
+
     // Heuristic: look for a number
     const numMatch = text.match(/\b([1-9]|10)\b/);
     return {
@@ -170,82 +183,76 @@ export class AutonomousLoop {
         let aborted = false;
 
         for (let iteration = 1; iteration <= maxIter; iteration++) {
-            // ── Phase 1: PLAN ──
-            const planResult = await this._chat(planPrompt(task, previousContext));
-            fullHistory.push(...planResult.history);
-            const plan = planResult.reply;
-
-            const planProgress: IterationProgress = {
-                iteration,
-                phase: 'plan',
-                plan,
-            };
-            progressHistory.push(planProgress);
-            if (onProgress && (await onProgress(planProgress)) === false) {
-                aborted = true;
-                break;
+            // ── Phase 1: PLAN ──  (#10: phase retry on failure)
+            let plan: string;
+            try {
+                const planResult = await this._chat(planPrompt(task, previousContext));
+                fullHistory.push(...planResult.history);
+                plan = planResult.reply;
+            } catch (e: any) {
+                try {
+                    const planResult = await this._chat(planPrompt(task, previousContext));
+                    fullHistory.push(...planResult.history);
+                    plan = planResult.reply;
+                } catch {
+                    plan = `Execute the task directly: ${task}`;
+                }
             }
+
+            const planProgress: IterationProgress = { iteration, phase: 'plan', plan };
+            progressHistory.push(planProgress);
+            if (await this._callOnProgress(onProgress, planProgress)) { aborted = true; break; }
 
             // ── Phase 2: EXECUTE ──
-            const execResult = await this._chat(executePrompt(task, plan));
-            fullHistory.push(...execResult.history);
-            const output = execResult.reply;
-
-            const execProgress: IterationProgress = {
-                iteration,
-                phase: 'execute',
-                plan,
-                output,
-            };
-            progressHistory.push(execProgress);
-            if (onProgress && (await onProgress(execProgress)) === false) {
-                aborted = true;
-                lastOutput = output;
-                break;
+            let output: string;
+            try {
+                const execResult = await this._chat(executePrompt(task, plan));
+                fullHistory.push(...execResult.history);
+                output = execResult.reply;
+            } catch (e: any) {
+                try {
+                    const execResult = await this._chat(executePrompt(task, plan));
+                    fullHistory.push(...execResult.history);
+                    output = execResult.reply;
+                } catch {
+                    output = `[Execute phase failed: ${e.message ?? String(e)}]`;
+                }
             }
+
+            const execProgress: IterationProgress = { iteration, phase: 'execute', plan, output };
+            progressHistory.push(execProgress);
+            if (await this._callOnProgress(onProgress, execProgress)) { aborted = true; lastOutput = output; break; }
 
             // ── Phase 3: REVIEW ──
-            const reviewResult = await this._chat(reviewPrompt(task, output));
-            fullHistory.push(...reviewResult.history);
-            const review = reviewResult.reply;
-
-            const reviewProgress: IterationProgress = {
-                iteration,
-                phase: 'review',
-                plan,
-                output,
-                review,
-            };
-            progressHistory.push(reviewProgress);
-            if (onProgress && (await onProgress(reviewProgress)) === false) {
-                aborted = true;
-                lastOutput = output;
-                break;
+            let review: string;
+            try {
+                const reviewResult = await this._chat(reviewPrompt(task, output));
+                fullHistory.push(...reviewResult.history);
+                review = reviewResult.reply;
+            } catch {
+                review = 'Review skipped due to error.';
             }
+
+            const reviewProgress: IterationProgress = { iteration, phase: 'review', plan, output, review };
+            progressHistory.push(reviewProgress);
+            if (await this._callOnProgress(onProgress, reviewProgress)) { aborted = true; lastOutput = output; break; }
 
             // ── Phase 4: EVALUATE ──
-            const evalResult = await this._chat(
-                evaluatePrompt(task, output, review),
-            );
-            fullHistory.push(...evalResult.history);
-            const evalParsed = parseEvaluation(evalResult.reply);
+            let evalParsed: EvalResult;
+            try {
+                const evalResult = await this._chat(evaluatePrompt(task, output, review));
+                fullHistory.push(...evalResult.history);
+                evalParsed = parseEvaluation(evalResult.reply);
+            } catch {
+                evalParsed = { score: 5, reasoning: 'Evaluation failed, using default score.', improvements: [] };
+            }
 
             const evalProgress: IterationProgress = {
-                iteration,
-                phase: 'evaluate',
-                plan,
-                output,
-                review,
-                evaluation: evalResult.reply,
-                qualityScore: evalParsed.score,
+                iteration, phase: 'evaluate', plan, output, review,
+                evaluation: evalParsed.reasoning, qualityScore: evalParsed.score,
             };
             progressHistory.push(evalProgress);
-            if (onProgress && (await onProgress(evalProgress)) === false) {
-                aborted = true;
-                lastOutput = output;
-                lastScore = evalParsed.score;
-                break;
-            }
+            if (await this._callOnProgress(onProgress, evalProgress)) { aborted = true; lastOutput = output; lastScore = evalParsed.score; break; }
 
             lastOutput = output;
             lastScore = evalParsed.score;
@@ -265,8 +272,7 @@ export class AutonomousLoop {
             // Build context for next iteration
             previousContext = [
                 `## Previous Iteration ${iteration}`,
-                `### Review`,
-                review,
+                `### Review`, review,
                 `### Evaluation (score: ${evalParsed.score}/${threshold} threshold)`,
                 evalParsed.reasoning,
                 `### Required Improvements`,
@@ -274,6 +280,11 @@ export class AutonomousLoop {
                     ? evalParsed.improvements.map((imp, i) => `${i + 1}. ${imp}`).join('\n')
                     : 'General quality improvement needed.',
             ].join('\n');
+
+            // #19: trim history to prevent unbounded growth
+            if (fullHistory.length > 40) {
+                fullHistory.splice(0, fullHistory.length - 20);
+            }
         }
 
         // Max iterations or abort — return best result
@@ -288,6 +299,20 @@ export class AutonomousLoop {
     }
 
     // --- Internal ---
+
+    /** #21: Safe onProgress wrapper — catches callback errors */
+    private async _callOnProgress(
+        onProgress: ((p: IterationProgress) => Promise<boolean | void> | boolean | void) | undefined,
+        progress: IterationProgress,
+    ): Promise<boolean> {
+        if (!onProgress) return false;
+        try {
+            return (await onProgress(progress)) === false;
+        } catch (e: any) {
+            console.error('[AutonomousLoop] onProgress callback error:', e.message ?? e);
+            return false;
+        }
+    }
 
     private async _chat(message: string): Promise<ChatResult> {
         return this._agent.chat(message);

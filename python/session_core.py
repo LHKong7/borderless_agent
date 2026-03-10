@@ -8,12 +8,17 @@ Responsibilities:
 """
 
 import json
+import logging
 import os
+import tempfile
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+
+logger = logging.getLogger("agent")
 
 from config import WORKDIR
 
@@ -67,6 +72,8 @@ class SessionManager:
         self._store = store
         self._sessions: Dict[str, Session] = {}
         self._active_session_id: Optional[str] = None
+        self._save_locks: Dict[str, threading.Lock] = {}  # #13: per-session mutex
+        self._save_locks_guard = threading.Lock()
         if self._store is None:
             self._ensure_storage_dir()
 
@@ -167,8 +174,20 @@ class SessionManager:
         recent.sort(key=lambda x: (-x.get("access_count", 0), -x.get("last_accessed", 0)))
         active.context["recent_files"] = recent[:100]
 
+    def _get_save_lock(self, session_id: str) -> threading.Lock:
+        """Get or create a per-session lock for serializing writes (#13)."""
+        with self._save_locks_guard:
+            if session_id not in self._save_locks:
+                self._save_locks[session_id] = threading.Lock()
+            return self._save_locks[session_id]
+
     def save_session(self, session: Session) -> None:
         """Persist a single session (file or cloud via store). Sanitizes sensitive data before storing."""
+        lock = self._get_save_lock(session.id)
+        with lock:
+            self._do_save_session(session)
+
+    def _do_save_session(self, session: Session) -> None:
         session.updated_at = time.time()
         data = session.to_dict()
         try:
@@ -181,8 +200,19 @@ class SessionManager:
             return
         self._ensure_storage_dir()
         path = self._session_file(session.id)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        # #3: atomic write — write to temp file then rename
+        try:
+            tmp_fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, str(path))
+        except Exception:
+            # Clean up temp file on failure
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
     def save_active(self) -> None:
         """Persist the active session to disk."""
@@ -199,7 +229,11 @@ class SessionManager:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except (json.JSONDecodeError, OSError):
+        except json.JSONDecodeError as e:
+            # #26: distinguish "corrupted" from "missing"
+            logger.error("[SessionManager] Corrupted session file %s: %s", path, e)
+            return None
+        except OSError:
             return None
 
     def _load_latest_from_disk(self) -> Optional[Dict[str, Any]]:

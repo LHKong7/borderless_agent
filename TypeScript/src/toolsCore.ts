@@ -265,10 +265,30 @@ detailed instructions and access to resources.`,
     },
 };
 
+export const ASK_USER_TOOL: Record<string, any> = {
+    name: 'ask_user',
+    description:
+        'Ask the user a question and wait for their response. ' +
+        'Use this when you need clarification, additional information, ' +
+        'confirmation on an important decision, or when the task is ambiguous. ' +
+        'Do NOT use this for trivial questions you can resolve yourself.',
+    input_schema: {
+        type: 'object',
+        properties: {
+            question: {
+                type: 'string',
+                description: 'The question to ask the user',
+            },
+        },
+        required: ['question'],
+    },
+};
+
 export const ALL_TOOLS: Record<string, any>[] = [
     ...BASE_TOOLS,
     TASK_TOOL,
     SKILL_TOOL,
+    ASK_USER_TOOL,
 ];
 
 // Safety limit
@@ -678,8 +698,44 @@ export function executeTool(name: string, args: Record<string, any>): string {
             return '(Task tool requires async execution)';
         case 'Skill':
             return '(Skill tool requires async execution — use executeToolAsync)';
+        case 'ask_user':
+            return '(ask_user tool requires async execution — use executeToolAsync)';
         default:
             return `Unknown tool: ${name}`;
+    }
+}
+
+// Human-in-the-loop callback for CLI mode (set by CLI main)
+let _humanInputCallback:
+    | ((question: string) => Promise<string> | string)
+    | null = null;
+
+export function setHumanInputCallback(
+    cb: ((question: string) => Promise<string> | string) | null,
+): void {
+    _humanInputCallback = cb;
+}
+
+export async function runAskUser(question: string): Promise<string> {
+    if (!_humanInputCallback) {
+        // Fallback: use readline for CLI mode
+        const readline = require('readline');
+        const rl = readline.createInterface({
+            input: process.stdin,
+            output: process.stdout,
+        });
+        return new Promise<string>((resolve) => {
+            rl.question(`\n🤖 Agent asks: ${question}\nYour answer: `, (answer: string) => {
+                rl.close();
+                resolve(answer.trim() || '(User provided no response)');
+            });
+        });
+    }
+    try {
+        const answer = await _humanInputCallback(question);
+        return answer || '(User provided no response)';
+    } catch (e: any) {
+        return `[Human input error] ${e.message ?? String(e)}`;
     }
 }
 
@@ -702,6 +758,9 @@ export async function executeToolAsync(
     }
     if (name === 'Skill') {
         return runSkill(args.skill);
+    }
+    if (name === 'ask_user') {
+        return runAskUser(args.question ?? '');
     }
     return executeTool(name, args);
 }

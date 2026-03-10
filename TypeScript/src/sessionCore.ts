@@ -73,6 +73,7 @@ export class SessionManager {
     private _store: SessionStore | null;
     private _sessions: Map<string, Session> = new Map();
     private _activeSessionId: string | null = null;
+    private _saveLocks: Map<string, Promise<void>> = new Map();
 
     constructor(options?: { storageDir?: string; store?: SessionStore | null }) {
         this._storageDir = options?.storageDir ?? SESSION_DIR;
@@ -170,6 +171,16 @@ export class SessionManager {
     }
 
     async saveSession(session: Session): Promise<void> {
+        // #13: per-session mutex to prevent concurrent write corruption
+        const prev = this._saveLocks.get(session.id) ?? Promise.resolve();
+        const current = prev.then(() => this._doSaveSession(session)).catch((e) => {
+            console.error(`[SessionManager] Failed to save session ${session.id}:`, e);
+        });
+        this._saveLocks.set(session.id, current);
+        await current;
+    }
+
+    private async _doSaveSession(session: Session): Promise<void> {
         session.updatedAt = Date.now() / 1000;
         let data = session.toDict();
         try {
@@ -184,7 +195,10 @@ export class SessionManager {
         }
         this._ensureStorageDir();
         const filePath = this._sessionFile(session.id);
-        fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+        // #3: atomic write — write to temp file then rename
+        const tmpPath = filePath + '.tmp';
+        fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), 'utf-8');
+        fs.renameSync(tmpPath, filePath);
     }
 
     async saveActive(): Promise<void> {
@@ -198,7 +212,8 @@ export class SessionManager {
         if (!fs.existsSync(filePath)) return null;
         try {
             return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-        } catch {
+        } catch (e) {
+            console.error(`[SessionManager] Corrupted session file ${filePath}:`, e);
             return null;
         }
     }

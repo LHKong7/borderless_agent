@@ -241,6 +241,7 @@ export class AgentInstance {
         name: string,
         args: Record<string, any>,
     ) => Promise<boolean> | boolean;
+    private _humanInputCallback?: (question: string) => Promise<string> | string;
     private _sandbox: Sandbox;
     private _mcpManager: MCPManager | null = null;
     private _mcpConfigs: MCPServerConfig[];
@@ -255,6 +256,7 @@ export class AgentInstance {
         this._streamingEnabled = config.enableStreaming ?? false;
         this._contextEnabled = config.enableContext ?? true;
         this._approvalCallback = config.approvalCallback;
+        this._humanInputCallback = config.humanInputCallback;
 
         // Assemble tools
         this._tools = [];
@@ -269,6 +271,9 @@ export class AgentInstance {
         this._skills = config.skills ?? [];
         const skillTool = buildSkillTool(this._skills);
         if (skillTool) this._tools.push(skillTool);
+
+        // Human-in-the-loop tool
+        this._tools.push(this._buildAskUserTool());
 
         // Build lookup and OpenAI format
         this._toolMap = new Map(this._tools.map((t) => [t.name, t]));
@@ -316,20 +321,25 @@ export class AgentInstance {
         if (this._mcpInitPromise) return this._mcpInitPromise;
 
         this._mcpInitPromise = (async () => {
-            this._mcpManager = new MCPManager();
-            await this._mcpManager.connect(this._mcpConfigs);
+            try {
+                this._mcpManager = new MCPManager();
+                await this._mcpManager.connect(this._mcpConfigs);
 
-            // Merge MCP tools into the agent's tool list
-            const mcpToolDefs = this._mcpManager.getToolDefinitions();
-            for (const mcpTool of mcpToolDefs) {
-                this._openaiTools.push({
-                    type: 'function',
-                    function: {
-                        name: mcpTool.name,
-                        description: mcpTool.description,
-                        parameters: mcpTool.input_schema,
-                    },
-                });
+                // Merge MCP tools into the agent's tool list
+                const mcpToolDefs = this._mcpManager.getToolDefinitions();
+                for (const mcpTool of mcpToolDefs) {
+                    this._openaiTools.push({
+                        type: 'function',
+                        function: {
+                            name: mcpTool.name,
+                            description: mcpTool.description,
+                            parameters: mcpTool.input_schema,
+                        },
+                    });
+                }
+            } catch (e: any) {
+                console.error('[AgentInstance] MCP connection failed, continuing without MCP tools:', e.message ?? e);
+                this._mcpManager = null;
             }
             this._mcpInitialized = true;
         })();
@@ -424,7 +434,11 @@ export class AgentInstance {
                 const result = await self._runLoop(message, session.history);
                 session.history = result.history;
                 session.updatedAt = Date.now() / 1000;
-                await self._sessionMgr.saveSession(session);
+                try {
+                    await self._sessionMgr.saveSession(session);
+                } catch (e: any) {
+                    console.error('[AgentInstance] Failed to save session:', e.message ?? e);
+                }
                 return { ...result, sessionId: session.id };
             },
             async *stream(message: string): AsyncGenerator<StreamChunk> {
@@ -444,6 +458,39 @@ export class AgentInstance {
         };
     }
 
+    // ---- Human-in-the-loop ----
+
+    private _buildAskUserTool(): ToolDefinition {
+        const self = this;
+        return {
+            name: 'ask_user',
+            description:
+                'Ask the user a question and wait for their response. ' +
+                'Use this when you need clarification, additional information, ' +
+                'confirmation on an important decision, or when the task is ambiguous. ' +
+                'Do NOT use this for trivial questions you can resolve yourself.',
+            parameters: {
+                question: {
+                    type: 'string',
+                    description: 'The question to ask the user',
+                },
+            },
+            required: ['question'],
+            execute: async (args) => {
+                const question = args.question ?? '';
+                if (!self._humanInputCallback) {
+                    return '[Human input not available] No humanInputCallback is configured. Proceed with your best judgment.';
+                }
+                try {
+                    const answer = await self._humanInputCallback(question);
+                    return answer || '(User provided no response)';
+                } catch (e: any) {
+                    return `[Human input error] ${e.message ?? String(e)}`;
+                }
+            },
+        };
+    }
+
     // ---- Internal agent loop ----
 
     private async _executeTool(
@@ -452,7 +499,11 @@ export class AgentInstance {
     ): Promise<string> {
         // Route MCP tools to MCPManager
         if (this._mcpManager?.isMCPTool(name)) {
-            return this._mcpManager.callTool(name, args);
+            try {
+                return await this._mcpManager.callTool(name, args);
+            } catch (e: any) {
+                return `[MCP tool error] ${name}: ${e.message ?? String(e)}`;
+            }
         }
 
         const tool = this._toolMap.get(name);
@@ -493,8 +544,12 @@ export class AgentInstance {
 
         let ragLines: string[] | undefined;
         if (this._memoryEnabled) {
-            const memories = await retrieve(userInput, 5);
-            ragLines = memories.map((m) => m[0]).filter(Boolean);
+            try {
+                const memories = await retrieve(userInput, 5);
+                ragLines = memories.map((m) => m[0]).filter(Boolean);
+            } catch (e: any) {
+                console.error('[AgentInstance] Memory retrieval failed, continuing without memories:', e.message ?? e);
+            }
         }
 
         return assembleSystem({
@@ -516,7 +571,11 @@ export class AgentInstance {
         let workingHistory = [...history];
         if (this._contextEnabled) {
             const budget = getBudget();
-            workingHistory = selectHistory(workingHistory, message, budget.history);
+            const selected = selectHistory(workingHistory, message, budget.history);
+            // #16: guarantee at least last 2 messages if history exists
+            workingHistory = selected.length > 0 ? selected
+                : workingHistory.length >= 2 ? workingHistory.slice(-2)
+                : [...workingHistory];
         }
         workingHistory.push({ role: 'user', content: message });
 
@@ -529,23 +588,33 @@ export class AgentInstance {
         let hadToolCalls = false;
 
         while (true) {
-            const response = (await this._llm.chat(apiMessages, {
-                tools: this._openaiTools,
-                maxTokens: 8000,
-                stream: false,
-            })) as LLMResponse;
+            // #1: LLM call with retry
+            let response: LLMResponse;
+            try {
+                response = await this._llmCallWithRetry(apiMessages, false) as LLMResponse;
+            } catch (e: any) {
+                const errMsg = `I encountered an error communicating with the AI model: ${e.message ?? String(e)}. Please try again.`;
+                workingHistory.push({ role: 'assistant', content: errMsg });
+                history.length = 0;
+                history.push(...workingHistory);
+                return { reply: errMsg, history: workingHistory, hadToolCalls };
+            }
 
             const tcs = response.toolCalls?.length
                 ? toolCallsToMsgShape(response.toolCalls)
                 : [];
             const content = response.content ?? '';
+            const thinking = response.thinking ?? null;
 
             if (!tcs.length) {
-                workingHistory.push({ role: 'assistant', content: content.trim() });
+                const assistantMsg: Record<string, any> = { role: 'assistant', content: content.trim() };
+                if (thinking) assistantMsg.thinking = thinking;
+                workingHistory.push(assistantMsg);
+                // #8: memory consolidation failure handling
                 if (this._memoryEnabled) {
-                    await consolidateTurn(message, content.trim());
+                    try { await consolidateTurn(message, content.trim()); }
+                    catch (e: any) { console.error('[AgentInstance] consolidateTurn failed:', e.message ?? e); }
                 }
-                // Sync back
                 history.length = 0;
                 history.push(...workingHistory);
                 return {
@@ -573,26 +642,35 @@ export class AgentInstance {
                 try {
                     args = JSON.parse(tc.function.arguments || '{}');
                 } catch {
-                    args = {};
+                    // #15: inform LLM about parse failure instead of silent {}
+                    results.push({
+                        tool_call_id: tc.id,
+                        content: `[Argument parse error] Could not parse arguments for tool "${tc.function.name}". Raw: ${(tc.function.arguments || '').slice(0, 200)}`,
+                    });
+                    continue;
                 }
-                let output = await this._executeTool(tc.function.name, args);
+                // #4: tool execution try-catch
+                let output: string;
+                try {
+                    output = await this._executeTool(tc.function.name, args);
+                } catch (e: any) {
+                    output = `[Tool error] ${tc.function.name}: ${e.message ?? String(e)}`;
+                }
                 if (this._contextEnabled) {
                     output = foldObservation(output);
                 }
                 results.push({ tool_call_id: tc.id, content: output });
             }
 
-            // Append to conversation
-            apiMessages.push({
+            // Append to conversation (preserve thinking if present)
+            const assistantToolMsg: Record<string, any> = {
                 role: 'assistant',
                 content: content || '',
                 tool_calls: tcs,
-            });
-            workingHistory.push({
-                role: 'assistant',
-                content: content || '',
-                tool_calls: tcs,
-            });
+            };
+            if (thinking) assistantToolMsg.thinking = thinking;
+            apiMessages.push(assistantToolMsg);
+            workingHistory.push({ ...assistantToolMsg });
             for (const r of results) {
                 apiMessages.push({
                     role: 'tool',
@@ -621,7 +699,10 @@ export class AgentInstance {
         let workingHistory = [...history];
         if (this._contextEnabled) {
             const budget = getBudget();
-            workingHistory = selectHistory(workingHistory, message, budget.history);
+            const selected = selectHistory(workingHistory, message, budget.history);
+            workingHistory = selected.length > 0 ? selected
+                : workingHistory.length >= 2 ? workingHistory.slice(-2)
+                : [...workingHistory];
         }
         workingHistory.push({ role: 'user', content: message });
 
@@ -634,29 +715,50 @@ export class AgentInstance {
         let hadToolCalls = false;
 
         while (true) {
-            const streamGen = this._llm.chat(apiMessages, {
-                tools: this._openaiTools,
-                maxTokens: 8000,
-                stream: true,
-            }) as AsyncGenerator<LLMResponse>;
+            let streamGen: AsyncGenerator<LLMResponse>;
+            try {
+                streamGen = await this._llmCallWithRetry(apiMessages, true) as AsyncGenerator<LLMResponse>;
+            } catch (e: any) {
+                const errMsg = `I encountered an error communicating with the AI model: ${e.message ?? String(e)}. Please try again.`;
+                workingHistory.push({ role: 'assistant', content: errMsg });
+                history.length = 0;
+                history.push(...workingHistory);
+                if (onComplete) onComplete({ reply: errMsg, history: workingHistory, hadToolCalls });
+                yield { reply: errMsg, done: true };
+                return;
+            }
 
             let lastResponse: LLMResponse | null = null;
-            for await (const r of streamGen) {
-                if (r.content && !r.toolCalls?.length) {
-                    yield { delta: r.content, done: false };
+            try {
+                for await (const r of streamGen) {
+                    if (r.content && !r.toolCalls?.length) {
+                        yield { delta: r.content, done: false };
+                    }
+                    lastResponse = r;
                 }
-                lastResponse = r;
+            } catch (e: any) {
+                const errMsg = `Stream interrupted: ${e.message ?? String(e)}`;
+                workingHistory.push({ role: 'assistant', content: errMsg });
+                history.length = 0;
+                history.push(...workingHistory);
+                if (onComplete) onComplete({ reply: errMsg, history: workingHistory, hadToolCalls });
+                yield { reply: errMsg, done: true };
+                return;
             }
 
             const content = lastResponse?.content ?? '';
+            const thinking = lastResponse?.thinking ?? null;
             const tcs = lastResponse?.toolCalls?.length
                 ? toolCallsToMsgShape(lastResponse.toolCalls)
                 : [];
 
             if (!tcs.length) {
-                workingHistory.push({ role: 'assistant', content: content.trim() });
+                const assistantMsg: Record<string, any> = { role: 'assistant', content: content.trim() };
+                if (thinking) assistantMsg.thinking = thinking;
+                workingHistory.push(assistantMsg);
                 if (this._memoryEnabled) {
-                    await consolidateTurn(message, content.trim());
+                    try { await consolidateTurn(message, content.trim()); }
+                    catch (e: any) { console.error('[AgentInstance] consolidateTurn failed:', e.message ?? e); }
                 }
                 history.length = 0;
                 history.push(...workingHistory);
@@ -691,23 +793,30 @@ export class AgentInstance {
                 try {
                     args = JSON.parse(tc.function.arguments || '{}');
                 } catch {
-                    args = {};
+                    results.push({
+                        tool_call_id: tc.id,
+                        content: `[Argument parse error] Could not parse arguments for tool "${tc.function.name}". Raw: ${(tc.function.arguments || '').slice(0, 200)}`,
+                    });
+                    continue;
                 }
-                let output = await this._executeTool(tc.function.name, args);
+                let output: string;
+                try {
+                    output = await this._executeTool(tc.function.name, args);
+                } catch (e: any) {
+                    output = `[Tool error] ${tc.function.name}: ${e.message ?? String(e)}`;
+                }
                 if (this._contextEnabled) output = foldObservation(output);
                 results.push({ tool_call_id: tc.id, content: output });
             }
 
-            apiMessages.push({
+            const assistantToolMsg: Record<string, any> = {
                 role: 'assistant',
                 content: content || '',
                 tool_calls: tcs,
-            });
-            workingHistory.push({
-                role: 'assistant',
-                content: content || '',
-                tool_calls: tcs,
-            });
+            };
+            if (thinking) assistantToolMsg.thinking = thinking;
+            apiMessages.push(assistantToolMsg);
+            workingHistory.push({ ...assistantToolMsg });
             for (const r of results) {
                 apiMessages.push({
                     role: 'tool',
@@ -721,5 +830,31 @@ export class AgentInstance {
                 });
             }
         }
+    }
+
+    // #1: LLM call with exponential backoff retry
+    private async _llmCallWithRetry(
+        apiMessages: Record<string, any>[],
+        stream: boolean,
+        maxRetries: number = 3,
+    ): Promise<LLMResponse | AsyncGenerator<LLMResponse>> {
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                return this._llm.chat(apiMessages, {
+                    tools: this._openaiTools,
+                    maxTokens: 8000,
+                    stream,
+                });
+            } catch (e: any) {
+                const status = e?.status ?? e?.response?.status;
+                const retryable = [429, 500, 502, 503].includes(status);
+                if (attempt < maxRetries && retryable) {
+                    await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt - 1)));
+                    continue;
+                }
+                throw e;
+            }
+        }
+        throw new Error('LLM call failed after retries');
     }
 }

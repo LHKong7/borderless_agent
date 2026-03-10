@@ -130,6 +130,13 @@ def _parse_evaluation(text: str) -> _EvalResult:
         except (json.JSONDecodeError, ValueError):
             pass
 
+    # #20: Try "score: N" format
+    score_match = re.search(r'score\s*[:\-=]\s*(\d+)', text, re.IGNORECASE)
+    if score_match:
+        s = int(score_match.group(1))
+        if 1 <= s <= 10:
+            return _EvalResult(score=s, reasoning=text[:200])
+
     # Heuristic fallback: find a standalone number 1–10
     num_match = re.search(r'\b([1-9]|10)\b', text)
     return _EvalResult(
@@ -169,60 +176,82 @@ class AutonomousLoop:
         previous_context = 'This is the first attempt. No previous context.'
 
         for iteration in range(1, max_iter + 1):
-            # ── Phase 1: PLAN ──
-            plan_result = self._agent.chat(_plan_prompt(task, previous_context))
-            full_history.extend(plan_result.history)
-            plan = plan_result.reply
+            # ── Phase 1: PLAN ── (#10: phase retry on failure)
+            try:
+                plan_result = self._agent.chat(_plan_prompt(task, previous_context))
+                full_history.extend(plan_result.history)
+                plan = plan_result.reply
+            except Exception as e:
+                try:
+                    plan_result = self._agent.chat(_plan_prompt(task, previous_context))
+                    full_history.extend(plan_result.history)
+                    plan = plan_result.reply
+                except Exception:
+                    plan = f"Execute the task directly: {task}"
 
             plan_progress = IterationProgress(
                 iteration=iteration, phase='plan', plan=plan,
             )
             progress_history.append(plan_progress)
-            if on_progress and on_progress(plan_progress) is False:
+            if self._call_on_progress(on_progress, plan_progress):
                 break
 
             # ── Phase 2: EXECUTE ──
-            exec_result = self._agent.chat(_execute_prompt(task, plan))
-            full_history.extend(exec_result.history)
-            output = exec_result.reply
+            try:
+                exec_result = self._agent.chat(_execute_prompt(task, plan))
+                full_history.extend(exec_result.history)
+                output = exec_result.reply
+            except Exception as e:
+                try:
+                    exec_result = self._agent.chat(_execute_prompt(task, plan))
+                    full_history.extend(exec_result.history)
+                    output = exec_result.reply
+                except Exception:
+                    output = f"[Execute phase failed: {e}]"
 
             exec_progress = IterationProgress(
                 iteration=iteration, phase='execute', plan=plan, output=output,
             )
             progress_history.append(exec_progress)
-            if on_progress and on_progress(exec_progress) is False:
+            if self._call_on_progress(on_progress, exec_progress):
                 last_output = output
                 break
 
             # ── Phase 3: REVIEW ──
-            review_result = self._agent.chat(_review_prompt(task, output))
-            full_history.extend(review_result.history)
-            review = review_result.reply
+            try:
+                review_result = self._agent.chat(_review_prompt(task, output))
+                full_history.extend(review_result.history)
+                review = review_result.reply
+            except Exception:
+                review = "Review skipped due to error."
 
             review_progress = IterationProgress(
                 iteration=iteration, phase='review',
                 plan=plan, output=output, review=review,
             )
             progress_history.append(review_progress)
-            if on_progress and on_progress(review_progress) is False:
+            if self._call_on_progress(on_progress, review_progress):
                 last_output = output
                 break
 
             # ── Phase 4: EVALUATE ──
-            eval_result = self._agent.chat(
-                _evaluate_prompt(task, output, review),
-            )
-            full_history.extend(eval_result.history)
-            eval_parsed = _parse_evaluation(eval_result.reply)
+            try:
+                eval_result = self._agent.chat(
+                    _evaluate_prompt(task, output, review),
+                )
+                full_history.extend(eval_result.history)
+                eval_parsed = _parse_evaluation(eval_result.reply)
+            except Exception:
+                eval_parsed = _EvalResult(score=5, reasoning='Evaluation failed, using default score.', improvements=[])
 
             eval_progress = IterationProgress(
                 iteration=iteration, phase='evaluate',
                 plan=plan, output=output, review=review,
-                evaluation=eval_result.reply,
+                evaluation=eval_parsed.reasoning,
                 quality_score=eval_parsed.score,
             )
             progress_history.append(eval_progress)
-            if on_progress and on_progress(eval_progress) is False:
+            if self._call_on_progress(on_progress, eval_progress):
                 last_output = output
                 last_score = eval_parsed.score
                 break
@@ -257,6 +286,10 @@ class AutonomousLoop:
                 improvements,
             ])
 
+            # #19: trim history to prevent unbounded growth
+            if len(full_history) > 40:
+                full_history = full_history[-20:]
+
         # Max iterations or abort
         return AutonomousTaskResult(
             result=last_output,
@@ -266,3 +299,15 @@ class AutonomousLoop:
             progress_history=progress_history,
             history=full_history,
         )
+
+    @staticmethod
+    def _call_on_progress(on_progress, progress: IterationProgress) -> bool:
+        """#21: Safe onProgress wrapper — catches callback errors. Returns True if aborted."""
+        if not on_progress:
+            return False
+        try:
+            return on_progress(progress) is False
+        except Exception as e:
+            import logging
+            logging.getLogger("agent").error("[AutonomousLoop] on_progress callback error: %s", e)
+            return False
