@@ -154,7 +154,7 @@ Agent 不应只“原样存日志”，而要具备**反思（Reflection）**能
 
 ## 6. 后续工程任务（待实现）
 
-1. ~~设计 Memory Store 接口（抽象层）~~ → 已实现 `memory_core.py`：
+1. ~~设计 Memory Store 接口（抽象层）~~ → 已实现 `memoryCore.ts`：
    - `write_event(...)` / `write_insight(...)`（情景 / 语义）
    - `retrieve(query, k)`（α·Recency + β·Importance + γ·Relevance，本地 JSON + 关键词相关性）
    - `garbage_collect(max_items, max_age_days)`

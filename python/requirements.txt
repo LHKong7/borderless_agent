@@ -1,8 +1,0 @@
-# Core (used by both CLI and server)
-python-dotenv
-openai
-mcp
-
-# Server only
-fastapi>=0.100.0
-uvicorn>=0.22.0
