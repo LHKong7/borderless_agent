@@ -23,7 +23,7 @@
 
 ## 1. 技能按需加载（Skill）
 
-**位置**：`skills_core.py`、`tools_core.py`（Skill 工具与 `run_skill`）
+**位置**：`skillsCore.ts`、`toolsCore.ts`（Skill 工具与 `runSkill`）
 
 **行为**：
 
@@ -34,15 +34,15 @@
 
 **相关代码**：
 
-- `skills_core.py`：`SkillLoader.load_skills()` 注释中的 "Only loads metadata at startup - body is loaded on-demand"。
-- `tools_core.py`：`run_skill()` 中调用 `SKILLS.get_skill_content(skill_name)` 并返回 `<skill-loaded>` 包裹的完整内容。
-- `main.py`：每轮开始时 `LOADED_SKILLS.clear()`，新一轮可重新按需加载技能。
+- `skillsCore.ts`：`SkillLoader.loadSkills()` 注释中的 "Only loads metadata at startup - body is loaded on-demand"。
+- `toolsCore.ts`：`runSkill()` 中调用 `SKILLS.getSkillContent(skillName)` 并返回 `<skill-loaded>` 包裹的完整内容。
+- `main.ts`：每轮开始时 `LOADED_SKILLS.clear()`，新一轮可重新按需加载技能。
 
 ---
 
 ## 2. 文件分页读取（read_file）
 
-**位置**：`tools_core.py` 中 `read_file` 工具与 `run_read()`
+**位置**：`toolsCore.ts` 中 `read_file` 工具与 `runRead()`
 
 **行为**：
 
@@ -52,51 +52,51 @@
 
 **相关代码**：
 
-- `tools_core.py`：`run_read(path, offset=0, limit=None)`，`READ_DEFAULT_LIMIT`、`READ_MAX_CHARS`，以及分页 footer 的生成。
+- `toolsCore.ts`：`runRead(path, offset=0, limit=undefined)`，`READ_DEFAULT_LIMIT`、`READ_MAX_CHARS`，以及分页 footer 的生成。
 
 ---
 
 ## 3. 对话历史选择（select_history）
 
-**位置**：`context_core.py` 中 `select_history()`，由 `main.py` 在每轮前调用。
+**位置**：`contextCore.ts` 中 `selectHistory()`，由 `main.ts` 在每轮前调用。
 
 **行为**：
 
-- 在启用上下文管理（`context_enabled()`）时，不把完整历史交给模型，而是：
-  - 先按**轮数**截断：只保留最近 `max_turns` 轮（每轮约 user+assistant，即最多 `max_turns*2` 条消息）。
-  - 再按 **max_tokens**（来自 `get_budget(model=MODEL)["history"]`）从前面裁剪，直到估计 token 数不超过预算。
+- 在启用上下文管理（`contextEnabled()`）时，不把完整历史交给模型，而是：
+  - 先按**轮数**截断：只保留最近 `maxTurns` 轮（每轮约 user+assistant，即最多 `maxTurns*2` 条消息）。
+  - 再按 **maxTokens**（来自 `getBudget(model=MODEL)["history"]`）从前面裁剪，直到估计 token 数不超过预算。
 - 从而只向模型**披露**「最近且 within 预算」的那一段历史，更早的要么被丢弃，要么通过下面的「对话摘要」间接披露。
 
 **相关代码**：
 
-- `main.py`：`history = select_history(history, user_input, max_tokens=budget["history"], max_turns=MAX_HISTORY_TURNS)`。
-- `context_core.py`：`select_history(history, user_input, max_tokens, max_turns)` 的滑动窗口与按 token 从前往后 trim 的逻辑。
+- `main.ts`：`history = selectHistory(history, userInput, { maxTokens: budget.history, maxTurns: MAX_HISTORY_TURNS })`。
+- `contextCore.ts`：`selectHistory(history, userInput, maxTokens, maxTurns)` 的滑动窗口与按 token 从前往后 trim 的逻辑。
 
 ---
 
 ## 4. 系统组装（RAG + 对话摘要）
 
-**位置**：`context_core.py` 中 `assemble_system()`，`main.py` 在每轮构造 `system_override` 时调用。
+**位置**：`contextCore.ts` 中 `assembleSystem()`，`main.ts` 在每轮构造 `systemOverride` 时调用。
 
 **行为**：
 
 - 系统提示由多段**分层披露**组成：
-  - **Base**：通用说明、技能列表、子代理列表等（`get_base_system()`）。
-  - **RAG**：`retrieve(user_input, k=5)` 得到的 top-k 条长期记忆，以「Relevant past context」形式注入，且受 `budget_rag` 截断。
-  - **Conversation summary**：较早轮次的压缩摘要（`lifecycle.get_conversation_summary()`），而不是完整历史正文。
+  - **Base**：通用说明、技能列表、子代理列表等（`getBaseSystem()`）。
+  - **RAG**：`retrieve(userInput, k=5)` 得到的 top-k 条长期记忆，以「Relevant past context」形式注入，且受 `budgetRag` 截断。
+  - **Conversation summary**：较早轮次的压缩摘要（`lifecycle.getConversationSummary()`），而不是完整历史正文。
   - 可选的 **Processing note**。
 - 模型看到的「过去」= 检索到的相关记忆 + 对话摘要 + 经 `select_history` 筛选的近期消息，形成渐进式披露。
 
 **相关代码**：
 
-- `main.py`：`system_override = assemble_system(get_base_system(), rag_lines=..., conversation_summary=lifecycle.get_conversation_summary(), budget_rag=budget["rag"])`。
-- `context_core.py`：`assemble_system(base_system, rag_lines, conversation_summary, processing_instruction, budget_rag)` 的拼接与 RAG/summary 长度限制。
+- `main.ts`：`systemOverride = assembleSystem(getBaseSystem(), { ragLines: ..., conversationSummary: lifecycle.getConversationSummary(), budgetRag: budget.rag })`。
+- `contextCore.ts`：`assembleSystem(baseSystem, ragLines, conversationSummary, processingInstruction, budgetRag)` 的拼接与 RAG/summary 长度限制。
 
 ---
 
 ## 5. 长期记忆检索（retrieve）
 
-**位置**：`memory_core.py` 中 `retrieve()`，由 `main.py` 在每轮调用。
+**位置**：`memoryCore.ts` 中 `retrieve()`，由 `main.ts` 在每轮调用。
 
 **行为**：
 
@@ -105,50 +105,50 @@
 
 **相关代码**：
 
-- `main.py`：`memory_tuples = retrieve(user_input, k=5)`，`rag_lines = [m[0] for m in memory_tuples if m[0]]`。
-- `memory_core.py`：`retrieve(query, k=5, ...)` 的打分、排序与 `scored[:k]`。
+- `main.ts`：`memoryTuples = retrieve(userInput, k=5)`，`ragLines = memoryTuples.filter(m => m[0]).map(m => m[0])`。
+- `memoryCore.ts`：`retrieve(query, k=5, ...)` 的打分、排序与 `scored.slice(0, k)`。
 
 ---
 
 ## 6. 话题切换与归档
 
-**位置**：`main.py` 中与 `LifecycleManager.detect_topic_shift()` 配合的逻辑，`context_core.py` 中 `LifecycleManager`、`summarize_rounds()`。
+**位置**：`main.ts` 中与 `LifecycleManager.detectTopicShift()` 配合的逻辑，`contextCore.ts` 中 `LifecycleManager`、`summarizeRounds()`。
 
 **行为**：
 
 - 当检测到用户意图明显变化（与最近若干条用户消息的关键词重叠很低）时：
-  - 对当前历史调用 `summarize_rounds(history)` 得到摘要；
-  - 将摘要写入长期记忆（`write_insight(summary)`）；
-  - 清空当前对话历史并 `lifecycle.reset_session()`。
+  - 对当前历史调用 `summarizeRounds(history)` 得到摘要；
+  - 将摘要写入长期记忆（`writeInsight(summary)`）；
+  - 清空当前对话历史并 `lifecycle.resetSession()`。
 - 之后模型只看到「新话题」下的新消息与新的 RAG 结果；旧话题的细节不再逐条披露，仅通过摘要进入长期记忆供日后检索。
 
 **相关代码**：
 
-- `main.py`：`if context_enabled() and lifecycle.detect_topic_shift(user_input, history[-6:]):` 分支内的 `summarize_rounds`、`write_insight`、`history.clear()`、`lifecycle.reset_session()`。
-- `context_core.py`：`LifecycleManager.detect_topic_shift()`、`reset_session()`，以及 `summarize_rounds()`。
+- `main.ts`：`if (contextEnabled() && lifecycle.detectTopicShift(userInput, history.slice(-6)))` 分支内的 `summarizeRounds`、`writeInsight`、`history.length = 0`、`lifecycle.resetSession()`。
+- `contextCore.ts`：`LifecycleManager.detectTopicShift()`、`resetSession()`，以及 `summarizeRounds()`。
 
 ---
 
 ## 7. 对话摘要压缩（conversation_summary）
 
-**位置**：`context_core.py` 中 `summarize_rounds()`、`LifecycleManager.set_conversation_summary/get_conversation_summary`，`main.py` 中每 10 轮更新摘要的逻辑。
+**位置**：`contextCore.ts` 中 `summarizeRounds()`、`LifecycleManager.setConversationSummary/getConversationSummary`，`main.ts` 中每 10 轮更新摘要的逻辑。
 
 **行为**：
 
-- 当 `len(history) >= 20`（约 10 轮）时，对「除最近 2 条外的历史」调用 `summarize_rounds(history[:-2])` 得到一段短文摘要；
-- 将结果写入 `lifecycle.set_conversation_summary(summary)`；
-- 在后续轮次中，`assemble_system(..., conversation_summary=lifecycle.get_conversation_summary(), ...)` 只向模型披露这段摘要（以及经 `select_history` 保留的近期消息），实现「旧对话压缩披露」。
+- 当 `history.length >= 20`（约 10 轮）时，对「除最近 2 条外的历史」调用 `summarizeRounds(history.slice(0, -2))` 得到一段短文摘要；
+- 将结果写入 `lifecycle.setConversationSummary(summary)`；
+- 在后续轮次中，`assembleSystem(..., { conversationSummary: lifecycle.getConversationSummary(), ... })` 只向模型披露这段摘要（以及经 `selectHistory` 保留的近期消息），实现「旧对话压缩披露」。
 
 **相关代码**：
 
-- `main.py`：`if context_enabled() and len(history) >= 20:` 内 `summary = summarize_rounds(history[:-2])`、`lifecycle.set_conversation_summary(summary)`。
-- `context_core.py`：`summarize_rounds(rounds)`（当前为基于前若干条消息的占位实现），以及 `assemble_system` 中的 `conversation_summary` 段（如 `summary[:1500]`）。
+- `main.ts`：`if (contextEnabled() && history.length >= 20)` 内 `summary = summarizeRounds(history.slice(0, -2))`、`lifecycle.setConversationSummary(summary)`。
+- `contextCore.ts`：`summarizeRounds(rounds)`（当前为基于前若干条消息的占位实现），以及 `assembleSystem` 中的 `conversationSummary` 段（如 `summary.slice(0, 1500)`）。
 
 ---
 
 ## 8. 工具输出折叠（fold_observation）
 
-**位置**：`context_core.py` 中 `fold_observation()`，`loop_core.py` 在每轮工具返回后对输出做折叠。
+**位置**：`contextCore.ts` 中 `foldObservation()`，`loopCore.ts` 在每轮工具返回后对输出做折叠。
 
 **行为**：
 
@@ -158,14 +158,14 @@
 
 **相关代码**：
 
-- `loop_core.py`：在 `execute_tool` 得到 `output` 后，若 `context_enabled()` 则 `output = fold_observation(output)`，再 append 到 messages。
-- `context_core.py`：`fold_observation(raw, max_chars=OBSERVATION_MAX_CHARS)` 的实现与 `OBSERVATION_MAX_CHARS`。
+- `loopCore.ts`：在 `executeTool` 得到 `output` 后，若 `contextEnabled()` 则 `output = foldObservation(output)`，再 append 到 messages。
+- `contextCore.ts`：`foldObservation(raw, maxChars=OBSERVATION_MAX_CHARS)` 的实现与 `OBSERVATION_MAX_CHARS`。
 
 ---
 
 ## 9. 子任务通过 Task 披露结果
 
-**位置**：`tools_core.py` 中 Task 工具与 `run_task()`。
+**位置**：`toolsCore.ts` 中 Task 工具与 `runTask()`。
 
 **行为**：
 
@@ -175,7 +175,7 @@
 
 **相关代码**：
 
-- `tools_core.py`：`run_task(description, prompt, agent_type)` 的循环与最终 `for block in response.content: return block.text`，主会话只收到这一段结果字符串。
+- `toolsCore.ts`：`runTask(description, prompt, agentType)` 的循环与最终结果提取，主会话只收到这一段结果字符串。
 
 ---
 
@@ -183,14 +183,14 @@
 
 | 机制             | 模块/入口                     | 披露策略简述                           |
 |------------------|------------------------------|----------------------------------------|
-| 技能按需加载     | skills_core, tools_core Skill | 仅在被请求时注入该技能完整内容         |
-| 文件分页         | tools_core read_file          | offset/limit 分页，按页披露             |
-| 历史选择         | context_core select_history   | 滑动窗口 + token 预算，只保留近期      |
-| 系统组装         | context_core assemble_system  | Base + RAG(top-k) + 对话摘要           |
-| 长期记忆         | memory_core retrieve          | 只注入 top-k 条相关记忆                 |
+| 技能按需加载     | skillsCore, toolsCore Skill   | 仅在被请求时注入该技能完整内容         |
+| 文件分页         | toolsCore read_file           | offset/limit 分页，按页披露             |
+| 历史选择         | contextCore selectHistory     | 滑动窗口 + token 预算，只保留近期      |
+| 系统组装         | contextCore assembleSystem    | Base + RAG(top-k) + 对话摘要           |
+| 长期记忆         | memoryCore retrieve           | 只注入 top-k 条相关记忆                 |
 | 话题切换归档     | main + LifecycleManager       | 旧话题压缩为摘要入记忆，清空历史       |
-| 对话摘要压缩     | summarize_rounds + lifecycle  | 旧轮次→摘要，只披露摘要+近期           |
-| 工具输出折叠     | context_core fold_observation | 超长输出→首尾摘要                      |
-| 子任务结果       | tools_core run_task           | 主对话只披露子任务描述与最终结果       |
+| 对话摘要压缩     | summarizeRounds + lifecycle   | 旧轮次→摘要，只披露摘要+近期           |
+| 工具输出折叠     | contextCore foldObservation   | 超长输出→首尾摘要                      |
+| 子任务结果       | toolsCore runTask             | 主对话只披露子任务描述与最终结果       |
 
 以上各部分共同构成程序中的**渐进式披露**设计：在保证任务可完成的前提下，按需、分层、分阶段地向模型披露信息，以控制上下文大小与 token 使用。

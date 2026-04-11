@@ -1,6 +1,6 @@
 # Agent Chat (React)
 
-React chat UI for the Agent API ([server/app.py](../server/app.py)).
+React chat UI for the Agent API ([TypeScript/src/server/app.ts](../../TypeScript/src/server/app.ts)).
 
 ## Setup
 
@@ -14,7 +14,7 @@ npm install
 1. Start the Agent server (from project root):
 
    ```bash
-   uv run python -m server
+   cd TypeScript && npx ts-node src/server/app.ts
    ```
 
 2. Start the React dev server (from `web/`):
@@ -31,7 +31,7 @@ npm install
 npm run build
 ```
 
-Output is in `dist/`. To serve it from the same origin as the API, copy `dist/` into `server/static/` and the FastAPI app can serve it at `/`.
+Output is in `dist/`. To serve it from the same origin as the API, copy `dist/` into `server/static/` and the Express app can serve it at `/`.
 
 ## API
 

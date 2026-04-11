@@ -1,5 +1,5 @@
 /**
- * API client for Agent server (server/app.py).
+ * API client for Agent server (TypeScript/src/server/app.ts).
  * In dev, Vite proxies /api to http://127.0.0.1:8000.
  */
 
