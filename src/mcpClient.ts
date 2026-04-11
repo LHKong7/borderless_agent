@@ -9,8 +9,8 @@
  */
 
 import { Client } from '@modelcontextprotocol/sdk/client';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { logger } from './config';
 
 // ---------------------------------------------------------------------------
@@ -157,7 +157,7 @@ export class MCPManager {
         const closePromises: Promise<void>[] = [];
         for (const server of this._servers.values()) {
             closePromises.push(
-                server.client.close().catch((err) => {
+                server.client.close().catch((err: unknown) => {
                     logger.error(`Error closing MCP server ${server.config.name}: ${err}`);
                 }),
             );
