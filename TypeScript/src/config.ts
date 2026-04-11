@@ -15,7 +15,7 @@ const _verbose = ['1', 'true', 'yes'].includes(
 export const LOG_LEVEL: string = _verbose ? 'debug' : 'info';
 
 /**
- * Simple logger matching the Python agent logger behavior.
+ * Simple logger for the agent system.
  */
 export const logger = {
     level: LOG_LEVEL,
@@ -43,8 +43,7 @@ export const slog = {
 };
 
 export function setupAgentLogging(): void {
-    // In Node.js the console is always available; this is a no-op placeholder
-    // matching the Python setup_agent_logging().
+    // In Node.js the console is always available; this is a no-op placeholder.
 }
 
 // Workspace and skills directory

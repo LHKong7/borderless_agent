@@ -198,8 +198,8 @@ User: [粘贴了 Log 文件]
 
 | 本文档概念 | 当前代码（参考） |
 |------------|------------------|
-| Short-term History | `main.py` 的 `history` + `memory_core.MAX_HISTORY_TURNS` 滑动窗口 |
-| Episodic Memory | `memory_core.retrieve()` 注入到 `loop_core` 的 system |
+| Short-term History | `main.ts` 的 `history` + `memoryCore.MAX_HISTORY_TURNS` 滑动窗口 |
+| Episodic Memory | `memoryCore.retrieve()` 注入到 `loopCore` 的 system |
 | Token Budget | 未实现，可增加 `ContextBudget` 与各源 `estimate_tokens()` |
 | Topic Shift | 未实现，可增加轻量分类器或基于 embedding 的漂移检测 |
 | Summarization | 未实现，可在超 N 轮时调用小模型做摘要并写入长期记忆 |

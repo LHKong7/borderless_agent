@@ -58,66 +58,62 @@
 
 #### A. LLM Provider 抽象
 
-```python
-# llm_protocol.py
-from typing import List, Dict, Any, Optional, Iterator
-from dataclasses import dataclass
+```typescript
+// llmProtocol.ts
 
-@dataclass
-class Message:
-    role: str  # "system" | "user" | "assistant" | "tool"
-    content: str | List[Dict[str, Any]]
+interface Message {
+    role: 'system' | 'user' | 'assistant' | 'tool';
+    content: string | Array<Record<string, any>>;
+}
 
-@dataclass
-class ToolCall:
-    id: str
-    name: str
-    arguments: Dict[str, Any]
+interface ToolCall {
+    id: string;
+    name: string;
+    arguments: Record<string, any>;
+}
 
-@dataclass
-class LLMResponse:
-    content: str | None
-    tool_calls: List[ToolCall]
-    usage: Dict[str, int]  # {prompt_tokens, completion_tokens}
-    model: str
+interface LLMResponse {
+    content: string | null;
+    toolCalls: ToolCall[];
+    usage: { promptTokens: number; completionTokens: number };
+    model: string;
+}
 
-class LLMProvider(Protocol):
-    """通用大模型提供者接口"""
+interface LLMProvider {
+    /** 通用大模型提供者接口 */
+    readonly contextWindowSize: number;
+    readonly supportsStreaming: boolean;
 
-    @property
-    def context_window_size(self) -> int: ...
+    chat(
+        messages: Message[],
+        options?: {
+            tools?: Record<string, any>[];
+            temperature?: number;
+            maxTokens?: number;
+            stream?: boolean;
+        },
+    ): Promise<LLMResponse> | AsyncGenerator<LLMResponse>;
 
-    @property
-    def supports_streaming(self) -> bool: ...
+    countTokens(messages: Message[]): number;
+}
 
-    def chat(
-        self,
-        messages: List[Message],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        temperature: float = 0.7,
-        max_tokens: Optional[int] = None,
-        stream: bool = False,
-    ) -> LLMResponse | Iterator[LLMResponse]: ...
+// 实现示例
+class OpenAIProvider implements LLMProvider {
+    private client: OpenAI;
+    readonly contextWindowSize = 128000; // 根据model动态返回
 
-    def count_tokens(self, messages: List[Message]) -> int: ...
+    constructor(apiKey: string, public model: string = 'gpt-4') {
+        this.client = new OpenAI({ apiKey });
+    }
 
-# 实现示例
-class OpenAIProvider(LLMProvider):
-    def __init__(self, api_key: str, model: str = "gpt-4"):
-        self.client = OpenAI(api_key=api_key)
-        self.model = model
+    async chat(messages: Message[], options?: any): Promise<LLMResponse> {
+        // OpenAI具体实现
+    }
+}
 
-    @property
-    def context_window_size(self) -> int:
-        return 128000  # 根据model动态返回
-
-    def chat(self, messages, tools=None, **kwargs):
-        # OpenAI具体实现
-        ...
-
-# 其他实现
-class AnthropicProvider(LLMProvider): ...
-class LocalLLMProvider(LLMProvider): ...  # vLLM/Ollama
+// 其他实现
+class AnthropicProvider implements LLMProvider { /* ... */ }
+class LocalLLMProvider implements LLMProvider { /* ... */ } // vLLM/Ollama
 ```
 
 **收益**:
@@ -127,54 +123,41 @@ class LocalLLMProvider(LLMProvider): ...  # vLLM/Ollama
 
 #### B. Tool Registry 抽象
 
-```python
-# tool_protocol.py
-from typing import Callable, Any, Dict, List
+```typescript
+// toolProtocol.ts
 
-@dataclass
-class ToolDefinition:
-    name: str
-    description: str
-    parameters: Dict[str, Any]  # JSON Schema
-    handler: Callable
-    permission_level: str = "normal"  # "safe" | "normal" | "dangerous"
-    is_mutating: bool = False
+interface ToolDefinition {
+    name: string;
+    description: string;
+    parameters: Record<string, any>; // JSON Schema
+    handler: (...args: any[]) => any;
+    permissionLevel?: 'safe' | 'normal' | 'dangerous'; // default: "normal"
+    isMutating?: boolean;
+}
 
-class ToolRegistry(Protocol):
-    """工具注册表接口"""
+interface ToolRegistry {
+    /** 工具注册表接口 */
+    register(tool: ToolDefinition): void;
+    unregister(name: string): void;
+    get(name: string): ToolDefinition | undefined;
+    listTools(agentType: string): ToolDefinition[];
+    execute(name: string, args: Record<string, any>, context: Record<string, any>): any;
+}
 
-    def register(self, tool: ToolDefinition) -> None: ...
+class DynamicToolRegistry implements ToolRegistry {
+    /** 支持运行时动态注册的工具注册表 */
+    private _tools = new Map<string, ToolDefinition>();
+    private _agentPermissions = new Map<string, string[]>();
 
-    def unregister(self, name: str) -> None: ...
+    register(tool: ToolDefinition): void {
+        this._tools.set(tool.name, tool);
+    }
 
-    def get(self, name: str) -> Optional[ToolDefinition]: ...
-
-    def list_tools(self, agent_type: str) -> List[ToolDefinition]: ...
-
-    def execute(
-        self,
-        name: str,
-        arguments: Dict[str, Any],
-        context: Dict[str, Any]
-    ) -> Any: ...
-
-class DynamicToolRegistry(ToolRegistry):
-    """支持运行时动态注册的工具注册表"""
-
-    def __init__(self):
-        self._tools: Dict[str, ToolDefinition] = {}
-        self._agent_permissions: Dict[str, List[str]] = {}
-
-    def register(self, tool: ToolDefinition) -> None:
-        self._tools[tool.name] = tool
-
-    def configure_agent_permissions(
-        self,
-        agent_type: str,
-        allowed_tools: List[str]
-    ) -> None:
-        """配置特定Agent类型可用的工具"""
-        self._agent_permissions[agent_type] = allowed_tools
+    configureAgentPermissions(agentType: string, allowedTools: string[]): void {
+        /** 配置特定Agent类型可用的工具 */
+        this._agentPermissions.set(agentType, allowedTools);
+    }
+}
 ```
 
 **收益**:
@@ -190,66 +173,69 @@ class DynamicToolRegistry(ToolRegistry):
 
 **建议**: 实现分层配置系统,支持运行时热更新。
 
-```python
-# config_manager.py
-from typing import Any, Dict, Optional
-import yaml
-import threading
+```typescript
+// configManager.ts
+import * as fs from 'fs';
+import * as yaml from 'yaml';
 
-class ConfigManager:
-    """分层配置管理器: 默认 < 文件 < 环境 < 运行时"""
+class ConfigManager {
+    /** 分层配置管理器: 默认 < 文件 < 环境 < 运行时 */
+    private _configs: Record<string, any> = {};
+    private _watchers: Array<(config: Record<string, any>) => void> = [];
 
-    def __init__(self):
-        self._configs: Dict[str, Any] = {}
-        self._lock = threading.RLock()
-        self._watchers: List[Callable] = []
+    loadFromFile(path: string): void {
+        /** 从YAML/JSON文件加载配置 */
+        const raw = fs.readFileSync(path, 'utf-8');
+        Object.assign(this._configs, yaml.parse(raw));
+        this._notifyWatchers();
+    }
 
-    def load_from_file(self, path: str) -> None:
-        """从YAML/JSON文件加载配置"""
-        with open(path) as f:
-            self._configs.update(yaml.safe_load(f))
-        self._notify_watchers()
+    loadFromDict(config: Record<string, any>): void {
+        /** 运行时动态更新配置 */
+        this._configs = { ...this._configs, ...config };
+        this._notifyWatchers();
+    }
 
-    def load_from_dict(self, config: Dict[str, Any]) -> None:
-        """运行时动态更新配置"""
-        with self._lock:
-            self._configs = {**self._configs, **config}
-        self._notify_watchers()
+    get(key: string, defaultValue?: any): any {
+        /** 支持点分隔路径: llm.temperature */
+        const keys = key.split('.');
+        let value: any = this._configs;
+        for (const k of keys) {
+            if (value && typeof value === 'object') {
+                value = value[k];
+            } else {
+                return defaultValue;
+            }
+        }
+        return value ?? defaultValue;
+    }
 
-    def get(self, key: str, default: Any = None) -> Any:
-        """支持点分隔路径: llm.temperature"""
-        keys = key.split(".")
-        value = self._configs
-        for k in keys:
-            if isinstance(value, dict):
-                value = value.get(k)
-            else:
-                return default
-        return value if value is not None else default
+    watch(callback: (config: Record<string, any>) => void): void {
+        /** 监听配置变更 */
+        this._watchers.push(callback);
+    }
 
-    def watch(self, callback: Callable[[str, Any, Any], None]) -> None:
-        """监听配置变更"""
-        self._watchers.append(callback)
+    private _notifyWatchers(): void {
+        for (const watcher of this._watchers) {
+            watcher(this._configs);
+        }
+    }
+}
 
-    def _notify_watchers(self) -> None:
-        for watcher in self._watchers:
-            watcher(self._configs)
+// 使用示例
+const config = new ConfigManager();
+config.loadFromFile('config.yaml');
 
-# 使用示例
-config = ConfigManager()
-config.load_from_file("config.yaml")
+// 运行时动态调整
+config.loadFromDict({
+    llm: { temperature: 0.5 },
+    context: { maxHistoryTurns: 20 },
+});
 
-# 运行时动态调整
-config.load_from_dict({
-    "llm": {"temperature": 0.5},
-    "context": {"max_history_turns": 20}
-})
-
-# 监听变更
-def on_config_change(new_config):
-    logger.info(f"Config updated: {new_config}")
-
-config.watch(on_config_change)
+// 监听变更
+config.watch((newConfig) => {
+    logger.info('Config updated:', newConfig);
+});
 ```
 
 **配置文件示例** (`config.yaml`):
@@ -300,122 +286,105 @@ storage:
 
 **建议**: 实现**插件系统**,支持第三方扩展。
 
-```python
-# plugin_manager.py
-from typing import Dict, List, Type
-import importlib
-import inspect
-from pathlib import Path
+```typescript
+// pluginManager.ts
+import * as fs from 'fs';
+import * as path from 'path';
 
-class Plugin:
-    """插件基类"""
+abstract class Plugin {
+    /** 插件基类 */
+    abstract readonly name: string;
+    readonly version: string = '1.0.0';
 
-    @property
-    def name(self) -> str:
-        raise NotImplementedError
+    initialize(context: Record<string, any>): void {}
+    registerTools(registry: ToolRegistry): void {}
+    registerAgents(registry: any): void {}
+    registerSkills(loader: any): void {}
+    shutdown(): void {}
+}
 
-    @property
-    def version(self) -> str:
-        return "1.0.0"
+class PluginManager {
+    /** 插件管理器 */
+    private _plugins = new Map<string, Plugin>();
+    private _hooks: Record<string, Array<(...args: any[]) => void>> = {
+        onToolExecute: [],
+        onAgentStart: [],
+        onMemoryWrite: [],
+    };
 
-    def initialize(self, context: Dict[str, Any]) -> None:
-        """插件初始化钩子"""
-        pass
+    constructor(private _registry: ToolRegistry) {}
 
-    def register_tools(self, registry: ToolRegistry) -> None:
-        """注册工具"""
-        pass
-
-    def register_agents(self, registry: AgentRegistry) -> None:
-        """注册Agent类型"""
-        pass
-
-    def register_skills(self, loader: SkillLoader) -> None:
-        """注册技能"""
-        pass
-
-    def shutdown(self) -> None:
-        """清理资源"""
-        pass
-
-
-class PluginManager:
-    """插件管理器"""
-
-    def __init__(self, registry: ToolRegistry):
-        self._registry = registry
-        self._plugins: Dict[str, Plugin] = {}
-        self._hooks: Dict[str, List[Callable]] = {
-            "on_tool_execute": [],
-            "on_agent_start": [],
-            "on_memory_write": [],
+    async loadPlugin(pluginPath: string): Promise<void> {
+        /** 从模块加载插件 */
+        const module = await import(pluginPath);
+        for (const key of Object.keys(module)) {
+            const Ctor = module[key];
+            if (typeof Ctor === 'function' && Ctor.prototype instanceof Plugin) {
+                const plugin: Plugin = new Ctor();
+                plugin.initialize({ registry: this._registry });
+                plugin.registerTools(this._registry);
+                this._plugins.set(plugin.name, plugin);
+                logger.info(`Loaded plugin: ${plugin.name} v${plugin.version}`);
+            }
         }
+    }
 
-    def load_plugin(self, plugin_path: str) -> None:
-        """从Python模块加载插件"""
-        module = importlib.import_module(plugin_path)
+    async loadPluginsFromDir(dirPath: string): Promise<void> {
+        /** 扫描目录加载所有插件 */
+        const files = fs.readdirSync(dirPath).filter(f => f.endsWith('.ts') || f.endsWith('.js'));
+        for (const file of files) {
+            await this.loadPlugin(path.join(dirPath, file));
+        }
+    }
 
-        # 查找Plugin子类
-        for name, obj in inspect.getmembers(module, inspect.isclass):
-            if issubclass(obj, Plugin) and obj != Plugin:
-                plugin = obj()
-                plugin.initialize({"registry": self._registry})
-                plugin.register_tools(self._registry)
-                self._plugins[plugin.name] = plugin
-                logger.info(f"Loaded plugin: {plugin.name} v{plugin.version}")
+    registerHook(event: string, callback: (...args: any[]) => void): void {
+        if (this._hooks[event]) this._hooks[event].push(callback);
+    }
 
-    def load_plugins_from_dir(self, dir_path: str) -> None:
-        """扫描目录加载所有插件"""
-        for path in Path(dir_path).glob("*.py"):
-            self.load_plugin(f"plugins.{path.stem}")
+    triggerHook(event: string, data?: Record<string, any>): void {
+        for (const callback of this._hooks[event] ?? []) {
+            callback(data);
+        }
+    }
+}
 
-    def register_hook(self, event: str, callback: Callable) -> None:
-        """注册事件钩子"""
-        if event in self._hooks:
-            self._hooks[event].append(callback)
+// 插件示例
+class DatabasePlugin extends Plugin {
+    /** 数据库操作插件 */
+    readonly name = 'database';
 
-    def trigger_hook(self, event: str, **kwargs) -> None:
-        """触发事件钩子"""
-        for callback in self._hooks.get(event, []):
-            callback(**kwargs)
-
-# 插件示例
-class DatabasePlugin(Plugin):
-    """数据库操作插件"""
-
-    @property
-    def name(self) -> str:
-        return "database"
-
-    def register_tools(self, registry: ToolRegistry) -> None:
-        registry.register(ToolDefinition(
-            name="run_sql",
-            description="Execute SQL queries on configured databases",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"},
-                    "database": {"type": "string"},
+    registerTools(registry: ToolRegistry): void {
+        registry.register({
+            name: 'run_sql',
+            description: 'Execute SQL queries on configured databases',
+            parameters: {
+                type: 'object',
+                properties: {
+                    query: { type: 'string' },
+                    database: { type: 'string' },
                 },
-                "required": ["query"],
+                required: ['query'],
             },
-            handler=self._execute_sql,
-            permission_level="normal",
-        ))
+            handler: this._executeSql.bind(this),
+            permissionLevel: 'normal',
+        });
+    }
 
-    def _execute_sql(self, query: str, database: str = "default"):
-        # 实际SQL执行逻辑
-        return f"Executed: {query}"
+    private _executeSql(query: string, database = 'default'): string {
+        // 实际SQL执行逻辑
+        return `Executed: ${query}`;
+    }
+}
 ```
 
 **插件目录结构**:
 
 ```
 plugins/
-├── __init__.py
-├── database_plugin.py
-├── web_scraper_plugin.py
-├── api_tools_plugin.py
+├── index.ts
+├── databasePlugin.ts
+├── webScraperPlugin.ts
+├── apiToolsPlugin.ts
 └── README.md
 ```
 
@@ -429,55 +398,56 @@ plugins/
 
 **建议**: 扩展工具和消息格式支持多模态。
 
-```python
-# multimodal.py
-from typing import List, Union
-from dataclasses import dataclass
-from enum import Enum
+```typescript
+// multimodal.ts
 
-class MediaType(Enum):
-    TEXT = "text"
-    IMAGE = "image"
-    AUDIO = "audio"
-    VIDEO = "video"
-    FILE = "file"
+enum MediaType {
+    TEXT = 'text',
+    IMAGE = 'image',
+    AUDIO = 'audio',
+    VIDEO = 'video',
+    FILE = 'file',
+}
 
-@dataclass
-class MediaContent:
-    type: MediaType
-    data: Union[str, bytes]
-    metadata: Dict[str, Any] = None
+interface MediaContent {
+    type: MediaType;
+    data: string | Buffer;
+    metadata?: Record<string, any>;
+}
 
-class MultimodalMessage(Message):
-    """支持多模态的消息"""
+interface MultimodalMessage extends Message {
+    /** 支持多模态的消息 */
+    content: string | MediaContent[];
+}
 
-    def __init__(
-        self,
-        role: str,
-        content: Union[str, List[MediaContent]],
-    ):
-        if isinstance(content, str):
-            content = [MediaContent(type=MediaType.TEXT, data=content)]
-        super().__init__(role=role, content=content)
+function createMultimodalMessage(role: string, content: string | MediaContent[]): MultimodalMessage {
+    if (typeof content === 'string') {
+        content = [{ type: MediaType.TEXT, data: content }];
+    }
+    return { role, content } as MultimodalMessage;
+}
 
-# 新增多模态工具
-MULTIMODAL_TOOLS = [
-    ToolDefinition(
-        name="analyze_image",
-        description="Analyze image content using vision model",
-        handler=analyze_image_with_vision,
-    ),
-    ToolDefinition(
-        name="transcribe_audio",
-        description="Transcribe audio to text",
-        handler=transcribe_audio,
-    ),
-    ToolDefinition(
-        name="generate_image",
-        description="Generate image from text description",
-        handler=generate_image_with_dalle,
-    ),
-]
+// 新增多模态工具
+const MULTIMODAL_TOOLS: ToolDefinition[] = [
+    {
+        name: 'analyze_image',
+        description: 'Analyze image content using vision model',
+        parameters: {},
+        handler: analyzeImageWithVision,
+    },
+    {
+        name: 'transcribe_audio',
+        description: 'Transcribe audio to text',
+        parameters: {},
+        handler: transcribeAudio,
+    },
+    {
+        name: 'generate_image',
+        description: 'Generate image from text description',
+        parameters: {},
+        handler: generateImageWithDalle,
+    },
+];
 ```
 
 ---
@@ -488,121 +458,114 @@ MULTIMODAL_TOOLS = [
 
 **建议**: 实现工作流编排引擎。
 
-```python
-# workflow_engine.py
-from typing import Dict, Any, List
-from dataclasses import dataclass
-from enum import Enum
+```typescript
+// workflowEngine.ts
 
-class StepStatus(Enum):
-    PENDING = "pending"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    SKIPPED = "skipped"
+enum StepStatus {
+    PENDING = 'pending',
+    RUNNING = 'running',
+    COMPLETED = 'completed',
+    FAILED = 'failed',
+    SKIPPED = 'skipped',
+}
 
-@dataclass
-class WorkflowStep:
-    id: str
-    name: str
-    tool_name: str
-    parameters: Dict[str, Any]
-    dependencies: List[str] = None  # 依赖的step ID
-    condition: str = None  # 条件表达式
+interface WorkflowStep {
+    id: string;
+    name: string;
+    toolName: string;
+    parameters: Record<string, any>;
+    dependencies?: string[]; // 依赖的step ID
+    condition?: string;      // 条件表达式
+}
 
-@dataclass
-class Workflow:
-    id: str
-    name: str
-    description: str
-    steps: List[WorkflowStep]
-    inputs: Dict[str, Any] = None
+interface Workflow {
+    id: string;
+    name: string;
+    description: string;
+    steps: WorkflowStep[];
+    inputs?: Record<string, any>;
+}
 
-class WorkflowEngine:
-    """工作流执行引擎"""
+class WorkflowEngine {
+    /** 工作流执行引擎 */
+    private _contexts = new Map<string, Record<string, any>>();
 
-    def __init__(self, tool_registry: ToolRegistry):
-        self._registry = tool_registry
-        self._contexts: Dict[str, Dict[str, Any]] = {}
+    constructor(private _registry: ToolRegistry) {}
 
-    def execute(self, workflow: Workflow) -> Dict[str, Any]:
-        """执行工作流"""
-        results = {}
-        context = {**(workflow.inputs or {})}
+    execute(workflow: Workflow): Record<string, any> {
+        const results: Record<string, any> = {};
+        const context = { ...(workflow.inputs ?? {}) };
 
-        # 拓扑排序确定执行顺序
-        sorted_steps = self._topological_sort(workflow.steps)
+        // 拓扑排序确定执行顺序
+        const sortedSteps = this._topologicalSort(workflow.steps);
 
-        for step in sorted_steps:
-            # 检查条件
-            if step.condition and not self._evaluate_condition(step.condition, context):
-                results[step.id] = {"status": StepStatus.SKIPPED}
-                continue
+        for (const step of sortedSteps) {
+            // 检查条件
+            if (step.condition && !this._evaluateCondition(step.condition, context)) {
+                results[step.id] = { status: StepStatus.SKIPPED };
+                continue;
+            }
 
-            # 检查依赖
-            if not self._check_dependencies(step, results):
-                results[step.id] = {"status": StepStatus.FAILED, "error": "Dependencies failed"}
-                continue
+            // 检查依赖
+            if (!this._checkDependencies(step, results)) {
+                results[step.id] = { status: StepStatus.FAILED, error: 'Dependencies failed' };
+                continue;
+            }
 
-            # 执行步骤
-            try:
-                result = self._execute_step(step, context)
-                results[step.id] = {
-                    "status": StepStatus.COMPLETED,
-                    "result": result
-                }
-                context[step.id] = result
-            except Exception as e:
-                results[step.id] = {
-                    "status": StepStatus.FAILED,
-                    "error": str(e)
-                }
+            // 执行步骤
+            try {
+                const result = this._executeStep(step, context);
+                results[step.id] = { status: StepStatus.COMPLETED, result };
+                context[step.id] = result;
+            } catch (e: any) {
+                results[step.id] = { status: StepStatus.FAILED, error: e.message };
+            }
+        }
 
-        return results
+        return results;
+    }
 
-    def _execute_step(self, step: WorkflowStep, context: Dict[str, Any]) -> Any:
-        """执行单个步骤"""
-        tool = self._registry.get(step.tool_name)
-        if not tool:
-            raise ValueError(f"Tool not found: {step.tool_name}")
+    private _executeStep(step: WorkflowStep, context: Record<string, any>): any {
+        const tool = this._registry.get(step.toolName);
+        if (!tool) throw new Error(`Tool not found: ${step.toolName}`);
+        const params = this._resolveParameters(step.parameters, context);
+        return tool.handler(params);
+    }
 
-        # 解析参数(支持引用前面的步骤结果)
-        params = self._resolve_parameters(step.parameters, context)
-        return tool.handler(**params)
+    private _topologicalSort(steps: WorkflowStep[]): WorkflowStep[] {
+        // 实现Kahn算法
+        // ...
+    }
+}
 
-    def _topological_sort(self, steps: List[WorkflowStep]) -> List[WorkflowStep]:
-        """拓扑排序"""
-        # 实现Kahn算法
-        ...
-
-# 工作流示例
-code_review_workflow = Workflow(
-    id="code_review",
-    name="Code Review Workflow",
-    description="Automated code review pipeline",
-    steps=[
-        WorkflowStep(
-            id="scan_security",
-            name="Security Scan",
-            tool_name="scan_vulnerabilities",
-            parameters={"path": "${repo_path}"}
-        ),
-        WorkflowStep(
-            id="check_style",
-            name="Style Check",
-            tool_name="run_linter",
-            parameters={"path": "${repo_path}"},
-            dependencies=["scan_security"]
-        ),
-        WorkflowStep(
-            id="run_tests",
-            name="Run Tests",
-            tool_name="bash",
-            parameters={"command": "pytest tests/"},
-            dependencies=["check_style"]
-        ),
-    ]
-)
+// 工作流示例
+const codeReviewWorkflow: Workflow = {
+    id: 'code_review',
+    name: 'Code Review Workflow',
+    description: 'Automated code review pipeline',
+    steps: [
+        {
+            id: 'scan_security',
+            name: 'Security Scan',
+            toolName: 'scan_vulnerabilities',
+            parameters: { path: '${repo_path}' },
+        },
+        {
+            id: 'check_style',
+            name: 'Style Check',
+            toolName: 'run_linter',
+            parameters: { path: '${repo_path}' },
+            dependencies: ['scan_security'],
+        },
+        {
+            id: 'run_tests',
+            name: 'Run Tests',
+            toolName: 'bash',
+            parameters: { command: 'npm test' },
+            dependencies: ['check_style'],
+        },
+    ],
+};
 ```
 
 ---
@@ -613,62 +576,64 @@ code_review_workflow = Workflow(
 
 **建议**: 实现**反思循环**,自动提炼和沉淀知识。
 
-```python
-# reflection_core.py
-from typing import List, Dict, Any
+```typescript
+// reflectionCore.ts
 
-class ReflectionEngine:
-    """反思引擎 - 从经验中学习"""
+class ReflectionEngine {
+    /** 反思引擎 - 从经验中学习 */
 
-    def __init__(self, memory_store, llm_provider):
-        self.memory = memory_store
-        self.llm = llm_provider
+    constructor(
+        private memory: any,
+        private llm: LLMProvider,
+    ) {}
 
-    async def reflect_on_episode(
-        self,
-        task: str,
-        actions: List[Dict[str, Any]],
-        outcomes: List[Dict[str, Any]],
-        final_result: Any
-    ) -> None:
-        """对一个完整任务进行反思"""
+    async reflectOnEpisode(
+        task: string,
+        actions: Record<string, any>[],
+        outcomes: Record<string, any>[],
+        finalResult: any,
+    ): Promise<void> {
+        // 1. 生成反思prompt
+        const reflectionPrompt = this._buildReflectionPrompt(task, actions, outcomes, finalResult);
 
-        # 1. 生成反思prompt
-        reflection_prompt = self._build_reflection_prompt(
-            task, actions, outcomes, final_result
-        )
+        // 2. 调用LLM进行反思
+        const response = await this.llm.chat([
+            { role: 'system', content: this._getReflectionSystemPrompt() },
+            { role: 'user', content: reflectionPrompt },
+        ]);
 
-        # 2. 调用LLM进行反思
-        response = await self.llm.chat([
-            Message(role="system", content=self._get_reflection_system_prompt()),
-            Message(role="user", content=reflection_prompt)
-        ])
+        // 3. 解析反思结果
+        const insights = this._parseReflections((response as LLMResponse).content);
 
-        # 3. 解析反思结果
-        insights = self._parse_reflections(response.content)
+        // 4. 写入长期记忆
+        for (const insight of insights) {
+            await this.memory.writeInsight({
+                content: insight.lesson,
+                importance: insight.importance,
+                tags: insight.tags,
+                source: 'reflection',
+            });
+        }
+    }
 
-        # 4. 写入长期记忆
-        for insight in insights:
-            await self.memory.write_insight(
-                content=insight["lesson"],
-                importance=insight["importance"],
-                tags=insight["tags"],
-                source="reflection"
-            )
+    private _buildReflectionPrompt(
+        task: string,
+        actions: Record<string, any>[],
+        outcomes: Record<string, any>[],
+        result: any,
+    ): string {
+        return `Analyze this completed task and extract learnings:
 
-    def _build_reflection_prompt(self, task, actions, outcomes, result) -> str:
-        return f"""Analyze this completed task and extract learnings:
-
-Task: {task}
+Task: ${task}
 
 Actions Taken:
-{self._format_actions(actions)}
+${this._formatActions(actions)}
 
 Outcomes:
-{self._format_outcomes(outcomes)}
+${this._formatOutcomes(outcomes)}
 
 Final Result:
-{result}
+${result}
 
 Please extract:
 1. What worked well (successful patterns)
@@ -676,39 +641,39 @@ Please extract:
 3. Generalizable lessons (rules of thumb)
 4. New knowledge gained
 
-Output as JSON with keys: successes, failures, lessons, knowledge."""
+Output as JSON with keys: successes, failures, lessons, knowledge.`;
+    }
 
-    async def reflect_on_error(
-        self,
-        task: str,
-        error: Exception,
-        context: Dict[str, Any]
-    ) -> str:
-        """对错误进行反思,生成修复建议"""
+    async reflectOnError(
+        task: string,
+        error: Error,
+        context: Record<string, any>,
+    ): Promise<string> {
+        /** 对错误进行反思,生成修复建议 */
+        const prompt = `Analyze this error and suggest fixes:
 
-        prompt = f"""Analyze this error and suggest fixes:
+Task: ${task}
+Error: ${error.message}
+Context: ${JSON.stringify(context)}
 
-Task: {task}
-Error: {error}
-Context: {context}
+What went wrong and how should it be fixed?`;
 
-What went wrong and how should it be fixed?"""
+        const response = await this.llm.chat([
+            { role: 'system', content: 'You are an expert debugger.' },
+            { role: 'user', content: prompt },
+        ]);
 
-        response = await self.llm.chat([
-            Message(role="system", content="You are an expert debugger."),
-            Message(role="user", content=prompt)
-        ])
+        const fixSuggestion = (response as LLMResponse).content!;
+        await this.memory.writeInsight({
+            content: `Fix for '${task}': ${fixSuggestion}`,
+            importance: 'high',
+            tags: ['error_fix', task],
+            source: 'error_reflection',
+        });
 
-        # 将修复建议写入记忆
-        fix_suggestion = response.content
-        await self.memory.write_insight(
-            content=f"Fix for '{task}': {fix_suggestion}",
-            importance="high",
-            tags=["error_fix", task],
-            source="error_reflection"
-        )
-
-        return fix_suggestion
+        return fixSuggestion;
+    }
+}
 ```
 
 ---
@@ -721,79 +686,68 @@ What went wrong and how should it be fixed?"""
 
 **建议**: 实现结构化日志和指标采集。
 
-```python
-# observability.py
-from typing import Dict, Any
-import time
-import json
-from dataclasses import dataclass, asdict
+```typescript
+// observability.ts
 
-@dataclass
-class TraceEvent:
-    timestamp: float
-    event_type: str  # "tool_call" | "agent_start" | "memory_write"
-    session_id: str
-    data: Dict[str, Any]
+interface TraceEvent {
+    timestamp: number;
+    eventType: string; // "tool_call" | "agent_start" | "memory_write"
+    sessionId: string;
+    data: Record<string, any>;
+}
 
-class ObservabilityManager:
-    """可观测性管理器"""
+class ObservabilityManager {
+    /** 可观测性管理器 */
+    private _events: TraceEvent[] = [];
+    private _metrics: Record<string, any[]> = {};
+    private _hooks: Record<string, Array<(event: TraceEvent) => void>> = {};
 
-    def __init__(self):
-        self._events: List[TraceEvent] = []
-        self._metrics: Dict[str, Any] = {}
-        self._hooks: Dict[str, List[Callable]] = {}
+    logEvent(eventType: string, sessionId: string, data: Record<string, any>): void {
+        const event: TraceEvent = {
+            timestamp: Date.now() / 1000,
+            eventType,
+            sessionId,
+            data,
+        };
+        this._events.push(event);
 
-    def log_event(self, event_type: str, session_id: str, data: Dict[str, Any]) -> None:
-        """记录事件"""
-        event = TraceEvent(
-            timestamp=time.time(),
-            event_type=event_type,
-            session_id=session_id,
-            data=data
-        )
-        self._events.append(event)
+        for (const hook of this._hooks[eventType] ?? []) {
+            hook(event);
+        }
+    }
 
-        # 触发钩子
-        for hook in self._hooks.get(event_type, []):
-            hook(event)
+    logMetric(name: string, value: number, tags?: Record<string, string>): void {
+        if (!this._metrics[name]) this._metrics[name] = [];
+        this._metrics[name].push({ value, timestamp: Date.now() / 1000, tags: tags ?? {} });
+    }
 
-    def log_metric(self, name: str, value: float, tags: Dict[str, str] = None) -> None:
-        """记录指标"""
-        if name not in self._metrics:
-            self._metrics[name] = []
-        self._metrics[name].append({
-            "value": value,
-            "timestamp": time.time(),
-            "tags": tags or {}
-        })
+    registerHook(eventType: string, callback: (event: TraceEvent) => void): void {
+        if (!this._hooks[eventType]) this._hooks[eventType] = [];
+        this._hooks[eventType].push(callback);
+    }
 
-    def register_hook(self, event_type: str, callback: Callable) -> None:
-        """注册事件监听器"""
-        if event_type not in self._hooks:
-            self._hooks[event_type] = []
-        self._hooks[event_type].append(callback)
+    exportTraces(): TraceEvent[] {
+        return [...this._events];
+    }
 
-    def export_traces(self) -> List[Dict[str, Any]]:
-        """导出追踪数据"""
-        return [asdict(e) for e in self._events]
+    exportMetrics(): Record<string, any[]> {
+        return { ...this._metrics };
+    }
+}
 
-    def export_metrics(self) -> Dict[str, Any]:
-        """导出指标数据"""
-        return self._metrics
+// 使用示例
+const obs = new ObservabilityManager();
 
-# 使用示例
-obs = ObservabilityManager()
+// 监控工具调用
+obs.registerHook('tool_call', (event) => {
+    console.log(`Tool ${event.data.tool} took ${event.data.duration}s`);
+});
 
-# 监控工具调用
-obs.register_hook("tool_call", lambda event: {
-    print(f"Tool {event.data['tool']} took {event.data['duration']}s")
-})
-
-# 监控Token使用
-obs.register_hook("llm_call", lambda event: {
-    obs.log_metric("llm.tokens.prompt", event.data["prompt_tokens"])
-    obs.log_metric("llm.tokens.completion", event.data["completion_tokens"])
-})
+// 监控Token使用
+obs.registerHook('llm_call', (event) => {
+    obs.logMetric('llm.tokens.prompt', event.data.promptTokens);
+    obs.logMetric('llm.tokens.completion', event.data.completionTokens);
+});
 ```
 
 ---
@@ -804,49 +758,47 @@ obs.register_hook("llm_call", lambda event: {
 
 **建议**: 构建Web UI或CLI调试器。
 
-```python
-# debugger.py
-from typing import Dict, Any, List
+```typescript
+// debugger.ts
 
-class AgentDebugger:
-    """Agent调试器"""
+class AgentDebugger {
+    /** Agent调试器 */
+    private breakpoints = new Map<string, string>();
 
-    def __init__(self, observability: ObservabilityManager):
-        self.obs = observability
-        self.breakpoints: Dict[str, Any] = {}
+    constructor(private obs: ObservabilityManager) {}
 
-    def set_breakpoint(
-        self,
-        condition: str,  # "tool_name == 'write_file'"
-        action: str = "pause"  # "pause" | "inspect" | "log"
-    ) -> None:
-        """设置断点"""
-        self.breakpoints[condition] = action
+    setBreakpoint(
+        condition: string, // "tool_name == 'write_file'"
+        action: string = 'pause', // "pause" | "inspect" | "log"
+    ): void {
+        this.breakpoints.set(condition, action);
+    }
 
-    def inspect_state(self, session_id: str) -> Dict[str, Any]:
-        """检查会话状态"""
-        events = [e for e in self.obs.export_traces() if e.session_id == session_id]
+    inspectState(sessionId: string): Record<string, any> {
+        const events = this.obs.exportTraces().filter(e => e.sessionId === sessionId);
         return {
-            "events": events,
-            "tools_called": self._analyze_tool_usage(events),
-            "token_usage": self._calculate_token_usage(events),
-            "timeline": self._build_timeline(events),
-        }
+            events,
+            toolsCalled: this._analyzeToolUsage(events),
+            tokenUsage: this._calculateTokenUsage(events),
+            timeline: this._buildTimeline(events),
+        };
+    }
 
-    def visualize_execution(self, session_id: str) -> str:
-        """可视化执行流程(Mermaid图表)"""
-        events = [e for e in self.obs.export_traces() if e.session_id == session_id]
+    visualizeExecution(sessionId: string): string {
+        /** 可视化执行流程(Mermaid图表) */
+        const events = this.obs.exportTraces().filter(e => e.sessionId === sessionId);
 
-        mermaid = ["graph TD"]
-        for i, event in enumerate(events):
-            node_id = f"n{i}"
-            label = f"{event.event_type}\\n{event.data.get('tool', '')}"
-            mermaid.append(f"{node_id}[{label}]")
+        const mermaid = ['graph TD'];
+        events.forEach((event, i) => {
+            const nodeId = `n${i}`;
+            const label = `${event.eventType}\\n${event.data.tool ?? ''}`;
+            mermaid.push(`${nodeId}[${label}]`);
+            if (i > 0) mermaid.push(`n${i - 1} --> ${nodeId}`);
+        });
 
-            if i > 0:
-                mermaid.append(f"n{i-1} --> {node_id}")
-
-        return "\\n".join(mermaid)
+        return mermaid.join('\\n');
+    }
+}
 ```
 
 ---
@@ -859,67 +811,53 @@ class AgentDebugger:
 
 **建议**: 全面改为异步架构。
 
-```python
-# async_execution.py
-import asyncio
-from typing import List, Dict, Any, Optional
+```typescript
+// asyncExecution.ts
 
-class AsyncToolExecutor:
-    """异步工具执行器"""
+class AsyncToolExecutor {
+    /** 异步工具执行器 */
+    private _running = 0;
 
-    def __init__(self, max_concurrent: int = 10):
-        self.semaphore = asyncio.Semaphore(max_concurrent)
+    constructor(
+        private _registry: ToolRegistry,
+        private maxConcurrent: number = 10,
+    ) {}
 
-    async def execute_tool(
-        self,
-        tool_name: str,
-        arguments: Dict[str, Any],
-        timeout: float = 30.0
-    ) -> Any:
-        """异步执行工具"""
-        async with self.semaphore:
-            tool = self._registry.get(tool_name)
+    async executeTool(
+        toolName: string,
+        args: Record<string, any>,
+        timeout: number = 30000,
+    ): Promise<any> {
+        while (this._running >= this.maxConcurrent) {
+            await new Promise(r => setTimeout(r, 50));
+        }
+        this._running++;
+        try {
+            const tool = this._registry.get(toolName);
+            if (!tool) throw new Error(`Tool not found: ${toolName}`);
 
-            # 在线程池中执行同步工具
-            loop = asyncio.get_event_loop()
-            return await asyncio.wait_for(
-                loop.run_in_executor(None, tool.handler, **arguments),
-                timeout=timeout
-            )
+            return await Promise.race([
+                Promise.resolve(tool.handler(args)),
+                new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error('Tool timeout')), timeout),
+                ),
+            ]);
+        } finally {
+            this._running--;
+        }
+    }
 
-    async def execute_tools_parallel(
-        self,
-        tools: List[Dict[str, Any]]
-    ) -> List[Any]:
-        """并行执行多个工具"""
-        tasks = [
-            self.execute_tool(t["name"], t["args"])
-            for t in tools
-        ]
-        return await asyncio.gather(*tasks, return_exceptions=True)
+    async executeToolsParallel(
+        tools: Array<{ name: string; args: Record<string, any> }>,
+    ): Promise<any[]> {
+        return Promise.allSettled(
+            tools.map(t => this.executeTool(t.name, t.args)),
+        );
+    }
+}
 
-class AsyncLLMProvider(LLMProvider):
-    """异步LLM提供者"""
-
-    async def chat_async(
-        self,
-        messages: List[Message],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        **kwargs
-    ) -> LLMResponse:
-        """异步聊天"""
-        # 使用OpenAI异步客户端
-        from openai import AsyncOpenAI
-        client = AsyncOpenAI(api_key=self.api_key)
-
-        response = await client.chat.completions.create(
-            model=self.model,
-            messages=self._convert_messages(messages),
-            tools=tools,
-            **kwargs
-        )
-
-        return self._parse_response(response)
+// AsyncLLMProvider — TypeScript 已原生支持 async/await，
+// OpenAI SDK 的 chat.completions.create() 返回 Promise，无需额外适配。
 ```
 
 ---
@@ -930,97 +868,88 @@ class AsyncLLMProvider(LLMProvider):
 
 **建议**: 实现多级缓存系统。
 
-```python
-# cache_manager.py
-from typing import List, Dict, Any, Optional
-import hashlib
-import json
+```typescript
+// cacheManager.ts
+import * as crypto from 'crypto';
 
-class CacheKey:
-    """缓存键生成器"""
+class CacheKey {
+    /** 缓存键生成器 */
 
-    @staticmethod
-    def for_llm_call(
-        messages: List[Message],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        temperature: float = 0.7
-    ) -> str:
-        """为LLM调用生成缓存键"""
-        payload = {
-            "messages": [(m.role, str(m.content)) for m in messages],
-            "tools": tools,
-            "temperature": temperature
+    static forLLMCall(
+        messages: Message[],
+        tools?: Record<string, any>[],
+        temperature = 0.7,
+    ): string {
+        const payload = {
+            messages: messages.map(m => [m.role, String(m.content)]),
+            tools,
+            temperature,
+        };
+        return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+    }
+
+    static forToolCall(toolName: string, args: Record<string, any>): string {
+        const payload = { tool: toolName, args };
+        return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+    }
+}
+
+class SemanticCache {
+    /** 语义缓存 - 基于向量相似度 */
+    private _cache = new Map<string, { response: string; embedding: number[] }>();
+
+    constructor(
+        private model: any,
+        private threshold = 0.95,
+    ) {}
+
+    async get(query: string, messages: Message[]): Promise<string | null> {
+        const queryEmbedding = await this.model.embed(query);
+        for (const [, value] of this._cache) {
+            const similarity = this._cosineSimilarity(queryEmbedding, value.embedding);
+            if (similarity >= this.threshold) return value.response;
         }
-        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+        return null;
+    }
 
-    @staticmethod
-    def for_tool_call(tool_name: str, arguments: Dict[str, Any]) -> str:
-        """为工具调用生成缓存键"""
-        payload = {"tool": tool_name, "args": arguments}
-        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+    async set(query: string, response: string): Promise<void> {
+        const embedding = await this.model.embed(query);
+        const key = CacheKey.forLLMCall([{ role: 'user', content: query }]);
+        this._cache.set(key, { response, embedding });
+    }
+}
 
-class SemanticCache:
-    """语义缓存 - 基于向量相似度"""
+class MultiLevelCache {
+    /** 多级缓存: L1(内存) -> L2(Redis) -> L3(语义) */
+    private l1 = new Map<string, any>(); // 内存缓存
+    private l2: any = null; // Redis客户端(可选)
+    private l3: SemanticCache;
 
-    def __init__(self, embedding_model, similarity_threshold: float = 0.95):
-        self.model = embedding_model
-        self.threshold = similarity_threshold
-        self._cache: Dict[str, Any] = {}
+    constructor(embeddingModel: any) {
+        this.l3 = new SemanticCache(embeddingModel);
+    }
 
-    async def get(
-        self,
-        query: str,
-        messages: List[Message]
-    ) -> Optional[str]:
-        """查找语义相似的缓存"""
-        query_embedding = await self.model.embed(query)
+    async get(key: string): Promise<any | null> {
+        /** L1 -> L2 -> L3查找 */
+        if (this.l1.has(key)) return this.l1.get(key);
 
-        for key, value in self._cache.items():
-            similarity = self._cosine_similarity(query_embedding, value["embedding"])
-            if similarity >= self.threshold:
-                return value["response"]
-
-        return None
-
-    async def set(self, query: str, response: str) -> None:
-        """存储缓存"""
-        embedding = await self.model.embed(query)
-        cache_key = CacheKey.for_llm_call([Message(role="user", content=query)])
-
-        self._cache[cache_key] = {
-            "response": response,
-            "embedding": embedding
+        if (this.l2) {
+            const value = await this.l2.get(key);
+            if (value) {
+                this.l1.set(key, value);
+                return value;
+            }
         }
 
-class MultiLevelCache:
-    """多级缓存: L1(内存) -> L2(Redis) -> L3(语义)"""
+        return null;
+    }
 
-    def __init__(self):
-        self.l1 = {}  # 内存缓存
-        self.l2 = None  # Redis客户端(可选)
-        self.l3 = SemanticCache(embedding_model)
-
-    async def get(self, key: str) -> Optional[Any]:
-        """L1 -> L2 -> L3查找"""
-        # L1
-        if key in self.l1:
-            return self.l1[key]
-
-        # L2
-        if self.l2:
-            value = await self.l2.get(key)
-            if value:
-                self.l1[key] = value
-                return value
-
-        return None
-
-    async def set(self, key: str, value: Any, ttl: int = 3600) -> None:
-        """写入所有级别"""
-        self.l1[key] = value
-
-        if self.l2:
-            await self.l2.set(key, value, ex=ttl)
+    async set(key: string, value: any, ttl = 3600): Promise<void> {
+        /** 写入所有级别 */
+        this.l1.set(key, value);
+        if (this.l2) await this.l2.set(key, value, { EX: ttl });
+    }
+}
 ```
 
 ---
@@ -1031,14 +960,14 @@ class MultiLevelCache:
 **目标**: 解耦核心依赖,建立抽象层
 
 - [ ] 实现`LLMProvider`协议及OpenAI/Anthropic适配器
-- [ ] 实现`ToolRegistry`协议,重构现有工具注册
+- [ ] 实现`ToolRegistry`���议,重构现有工具注册
 - [ ] 实现`StorageBackend`协议统一存储接口
 - [ ] 编写单元测试确保抽象层正确性
 
 **交付物**:
-- `llm_protocol.py`, `tool_protocol.py`, `storage_protocol.py`
-- OpenAI/Anthropic双适配器实现
-- 完整的单元测试套件
+- `llmProtocol.ts`, `toolProtocol.ts`, `storage/protocols.ts`
+- OpenAI/Anthropic双适配��实现
+- 完整��单元测试套件
 
 ---
 
@@ -1047,11 +976,11 @@ class MultiLevelCache:
 
 - [ ] 实现`ConfigManager`支持YAML配置和热更新
 - [ ] 实现`PluginManager`和插件加载机制
-- [ ] 重构现有技能系统为插件
+- [ ] 重构现有技���系统为插件
 - [ ] 编写插件开发文档
 
 **交付物**:
-- `config_manager.py`, `plugin_manager.py`
+- `configManager.ts`, `pluginManager.ts`
 - 3个示例插件(Database, WebScraper, API)
 - `plugins/README.md`开发指南
 
@@ -1065,8 +994,8 @@ class MultiLevelCache:
 - [ ] 实现`ReflectionEngine`自动学习机制
 - [ ] 集成到主循环
 
-**交付物**:
-- `multimodal.py`, `workflow_engine.py`, `reflection_core.py`
+**交付��**:
+- `multimodal.ts`, `workflowEngine.ts`, `reflectionCore.ts`
 - 多模态工具示例(图像分析、音频转写)
 - 工作流示例(代码审查流程)
 
@@ -1081,7 +1010,7 @@ class MultiLevelCache:
 - [ ] 集成Prometheus/Grafana指标导出
 
 **交付物**:
-- `observability.py`, `debugger.py`
+- `observability.ts`, `debugger.ts`
 - Web Dashboard (`web_ui/`)
 - 监控指标定义文档
 
@@ -1096,7 +1025,7 @@ class MultiLevelCache:
 - [ ] 性能基准测试和优化
 
 **交付物**:
-- `async_execution.py`, `cache_manager.py`
+- `asyncExecution.ts`, `cacheManager.ts`
 - 性能测试报告
 - 优化前后对比数据
 
@@ -1127,22 +1056,23 @@ class MultiLevelCache:
 - 提供迁移工具和指南
 
 ### API兼容层
-```python
-# compatibility.py
-class LegacyAPI:
-    """兼容旧版本的API包装器"""
+```typescript
+// compatibility.ts
+class LegacyAPI {
+    /** 兼容旧版本的API包装器 */
 
-    def __init__(self, new_system):
-        self._new = new_system
+    constructor(private _new: any) {}
 
-    def old_method(self, *args, **kwargs):
-        # 转换为新API调用
-        return self._new.new_equivalent(*args, **kwargs)
+    oldMethod(...args: any[]): any {
+        // 转换为新API调用
+        return this._new.newEquivalent(...args);
+    }
+}
 
-# 使用示例
-legacy = LegacyAPI(new_system)
-# 旧代码无需修改
-legacy.old_method()
+// 使用示例
+const legacy = new LegacyAPI(newSystem);
+// 旧代码���需修改
+legacy.oldMethod();
 ```
 
 ---
@@ -1154,8 +1084,8 @@ legacy.old_method()
 | 指标 | 当前 | 目标 |
 |------|------|------|
 | **切换LLM提供商** | 需修改核心代码 | 配置文件修改即可 |
-| **新增工具** | 修改`tools_core.py` | 独立插件,零侵入 |
-| **新增Agent类型** | 修改`agents_core.py` | YAML配置即可 |
+| **新增工具** | 修改`toolsCore.ts` | 独立插件,零侵入 |
+| **新增Agent类型** | 修改`agentsCore.ts` | YAML配置即可 |
 | **Token利用率** | ~60% (重复查询) | ~85% (语义缓存) |
 | **并发处理能力** | 单线程 | 10+ 并发任务 |
 | **启动时间** | ~500ms | <100ms (延迟加载) |
