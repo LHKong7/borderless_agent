@@ -1,6 +1,6 @@
 {
   "name": "borderless-agent",
-  "version": "0.0.1-alpha.4",
+  "version": "0.0.1-alpha.5",
   "description": "Portable agentic AI framework — build agents with custom tools, skills, and system prompts",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -32,7 +32,6 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.500.0",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "dotenv": "^16.4.0",
     "express": "^4.18.0",
@@ -40,7 +39,16 @@
     "uuid": "^9.0.0",
     "zod": "^3.25.76"
   },
+  "peerDependencies": {
+    "@aws-sdk/client-s3": "^3.500.0"
+  },
+  "peerDependenciesMeta": {
+    "@aws-sdk/client-s3": {
+      "optional": true
+    }
+  },
   "devDependencies": {
+    "@aws-sdk/client-s3": "^3.500.0",
     "@types/express": "^4.17.21",
     "@types/node": "^20.11.0",
     "@types/uuid": "^9.0.7",
