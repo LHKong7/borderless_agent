@@ -23,6 +23,7 @@ import { LifecycleManager, getBudget, selectHistory, assembleSystem, sanitizeUse
 import { retrieve, consolidateTurn, writeInsight, setMemoryStore, MEMORY_ENABLED } from './memoryCore';
 import { createFileBackend } from './storage/fileBackend';
 import { StorageBackend } from './storage/protocols';
+import { toTokenUsage, mergeTokenUsage, estimateCost, type TokenUsage } from './pricing';
 import { Sandbox } from './sandbox';
 import { MCPManager, MCPServerConfig } from './mcpClient';
 
@@ -617,6 +618,7 @@ export class AgentInstance {
 
         let toolRounds = 0;
         let hadToolCalls = false;
+        let accumulatedUsage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
 
         while (true) {
             // #1: LLM call with retry
@@ -628,7 +630,12 @@ export class AgentInstance {
                 workingHistory.push({ role: 'assistant', content: errMsg });
                 history.length = 0;
                 history.push(...workingHistory);
-                return { reply: errMsg, history: workingHistory, hadToolCalls };
+                return { reply: errMsg, history: workingHistory, hadToolCalls, usage: accumulatedUsage };
+            }
+
+            // Accumulate token usage
+            if (response.usage && Object.keys(response.usage).length > 0) {
+                accumulatedUsage = mergeTokenUsage(accumulatedUsage, toTokenUsage(response.usage));
             }
 
             const tcs = response.toolCalls?.length
@@ -648,10 +655,13 @@ export class AgentInstance {
                 }
                 history.length = 0;
                 history.push(...workingHistory);
+                const model = response.model ?? '';
                 return {
                     reply: content.trim(),
                     history: workingHistory,
                     hadToolCalls,
+                    usage: accumulatedUsage,
+                    estimatedCost: estimateCost(accumulatedUsage, model),
                 };
             }
 
@@ -663,7 +673,7 @@ export class AgentInstance {
                 workingHistory.push({ role: 'assistant', content: msg });
                 history.length = 0;
                 history.push(...workingHistory);
-                return { reply: msg, history: workingHistory, hadToolCalls };
+                return { reply: msg, history: workingHistory, hadToolCalls, usage: accumulatedUsage };
             }
 
             // Execute tools

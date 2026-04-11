@@ -4,16 +4,14 @@
  * Usage:
  * ```ts
  * const agent = new AgentBuilder()
- *   .setLLM({ apiKey: 'sk-...', model: 'gpt-4o' })
+ *   .setProvider('openai', { apiKey: 'sk-...', model: 'gpt-4o' })
  *   .setSystemPrompt('You are a helpful assistant.')
  *   .addTool({ name: 'greet', description: 'Say hi', execute: () => 'Hi!' })
- *   .addSkill({ name: 'ts', description: 'TypeScript', body: '...' })
- *   .enableMemory()
  *   .build();
  * ```
  */
 
-import { OpenAIProvider, LLMProvider } from './llmProtocol';
+import { LLMProvider } from './llmProtocol';
 import {
     ToolDefinition,
     SkillDefinition,
@@ -22,6 +20,9 @@ import {
     StorageConfig,
 } from './types';
 import type { SandboxConfig } from './sandbox';
+import type { EmbeddingProvider } from './providers/embeddings';
+import type { ProviderName } from './providers/base';
+import type { ModelPricing } from './pricing';
 import { AgentInstance } from './agentInstance';
 
 export class AgentBuilder {
@@ -37,7 +38,7 @@ export class AgentBuilder {
 
     // ---- LLM ----
 
-    /** Provide an LLM config (creates an OpenAIProvider automatically). */
+    /** Provide an LLM config (creates a provider automatically based on config.provider). */
     setLLM(config: LLMConfig): this {
         this._config.llmConfig = config;
         return this;
@@ -46,6 +47,20 @@ export class AgentBuilder {
     /** Provide a custom LLMProvider instance directly. */
     setLLMProvider(provider: LLMProvider): this {
         this._config.llm = provider;
+        return this;
+    }
+
+    /**
+     * Shorthand: select a provider by name and configure it.
+     * All providers support baseUrl for API-compatible endpoints.
+     *
+     * @example
+     * builder.setProvider('anthropic', { apiKey: 'sk-ant-...', model: 'claude-sonnet-4-20250514' })
+     * builder.setProvider('openai', { apiKey: 'sk-...', baseUrl: 'https://my-proxy.com/v1' })
+     * builder.setProvider('google', { apiKey: 'AIza...', model: 'gemini-2.0-flash' })
+     */
+    setProvider(provider: ProviderName, config: LLMConfig): this {
+        this._config.llmConfig = { ...config, provider };
         return this;
     }
 
@@ -149,6 +164,28 @@ export class AgentBuilder {
         return this;
     }
 
+    // ---- Embeddings (optional) ----
+
+    /**
+     * Set an embedding provider for vector-based memory retrieval.
+     * This is entirely optional — without it, memory uses keyword-based scoring.
+     */
+    setEmbeddingProvider(provider: EmbeddingProvider): this {
+        this._config.embeddingProvider = provider;
+        return this;
+    }
+
+    // ---- Pricing ----
+
+    /**
+     * Override model pricing for cost estimation.
+     */
+    setModelPricing(pricing: Record<string, ModelPricing>): this {
+        const { setModelPricing } = require('./pricing');
+        setModelPricing(pricing);
+        return this;
+    }
+
     // ---- MCP ----
 
     /** Add an MCP server to connect to when the agent is built. */
@@ -182,17 +219,49 @@ export class AgentBuilder {
             const cfg = this._config.llmConfig;
             if (!cfg?.apiKey) {
                 throw new Error(
-                    'AgentBuilder: must call .setLLM({ apiKey }) or .setLLMProvider() before .build()',
+                    'AgentBuilder: must call .setLLM({ apiKey }), .setProvider(), or .setLLMProvider() before .build()',
                 );
             }
-            this._config.llm = new OpenAIProvider({
-                apiKey: cfg.apiKey,
-                model: cfg.model ?? 'gpt-4o',
-                baseUrl: cfg.baseUrl,
-                timeout: cfg.timeout ?? 120,
-            });
+            this._config.llm = this._createProvider(cfg);
         }
 
         return new AgentInstance({ ...this._config });
+    }
+
+    // ---- Private ----
+
+    private _createProvider(cfg: LLMConfig): LLMProvider {
+        const provider = cfg.provider ?? 'openai';
+
+        switch (provider) {
+            case 'openai': {
+                const { OpenAIProvider } = require('./providers/openai');
+                return new OpenAIProvider({
+                    apiKey: cfg.apiKey,
+                    model: cfg.model ?? 'gpt-4o',
+                    baseUrl: cfg.baseUrl,
+                    timeout: cfg.timeout ?? 120,
+                });
+            }
+            case 'anthropic': {
+                const { AnthropicProvider } = require('./providers/anthropic');
+                return new AnthropicProvider({
+                    apiKey: cfg.apiKey,
+                    model: cfg.model ?? 'claude-sonnet-4-20250514',
+                    baseUrl: cfg.baseUrl,
+                    timeout: cfg.timeout ?? 120,
+                });
+            }
+            case 'google': {
+                const { GoogleProvider } = require('./providers/google');
+                return new GoogleProvider({
+                    apiKey: cfg.apiKey,
+                    model: cfg.model ?? 'gemini-2.0-flash',
+                    baseUrl: cfg.baseUrl,
+                });
+            }
+            default:
+                throw new Error(`Unknown provider: ${provider}. Use 'openai', 'anthropic', or 'google'.`);
+        }
     }
 }

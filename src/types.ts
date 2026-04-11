@@ -6,6 +6,9 @@
 
 import type { LLMProvider } from './llmProtocol';
 import type { SandboxConfig } from './sandbox';
+import type { EmbeddingProvider } from './providers/embeddings';
+import type { ProviderName } from './providers/base';
+import type { TokenUsage } from './pricing';
 
 // ---------------------------------------------------------------------------
 // Tool definition (user-facing)
@@ -89,8 +92,11 @@ export interface SkillDefinition {
 export interface LLMConfig {
     apiKey: string;
     model?: string;
+    /** Custom base URL for API-compatible endpoints (works with all providers). */
     baseUrl?: string;
     timeout?: number;
+    /** Provider type. Used by setProvider() shorthand. Default: 'openai'. */
+    provider?: ProviderName;
 }
 
 export interface StorageConfig {
@@ -142,6 +148,11 @@ export interface AgentConfig {
     sandbox?: SandboxConfig;
     /** MCP server configurations to connect to. */
     mcpServers?: import('./mcpClient').MCPServerConfig[];
+    /**
+     * Optional embedding provider for vector-based memory retrieval.
+     * When not set, memory retrieval uses keyword-based scoring only.
+     */
+    embeddingProvider?: EmbeddingProvider;
 }
 
 // ---------------------------------------------------------------------------
@@ -157,6 +168,10 @@ export interface ChatResult {
     hadToolCalls: boolean;
     /** Session ID (if session is active). */
     sessionId?: string;
+    /** Token usage for this turn (accumulated across all LLM calls in the turn). */
+    usage?: TokenUsage;
+    /** Estimated cost in USD for this turn. */
+    estimatedCost?: number;
 }
 
 export interface StreamChunk {
@@ -166,6 +181,10 @@ export interface StreamChunk {
     reply?: string;
     /** Whether this is the final chunk. */
     done: boolean;
+    /** Token usage (present on the final chunk). */
+    usage?: TokenUsage;
+    /** Estimated cost in USD (present on the final chunk). */
+    estimatedCost?: number;
 }
 
 // ---------------------------------------------------------------------------

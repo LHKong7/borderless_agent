@@ -1,12 +1,12 @@
 /**
- * index.ts — Public barrel export for the agentic-system library.
+ * index.ts — Public barrel export for the borderless-agent library.
  *
  * Usage:
  * ```ts
- * import { AgentBuilder, createFileStorage } from 'agentic-system';
+ * import { AgentBuilder } from 'borderless-agent';
  *
  * const agent = new AgentBuilder()
- *   .setLLM({ apiKey: 'sk-...' })
+ *   .setProvider('openai', { apiKey: 'sk-...' })
  *   .setSystemPrompt('You are helpful.')
  *   .addTool({ name: 'hello', description: 'Say hi', execute: () => 'Hi!' })
  *   .build();
@@ -35,9 +35,28 @@ export type {
     AutonomousPhase,
 } from './types';
 
-// ---- LLM provider (for advanced users who want to supply their own) ----
-export { OpenAIProvider } from './llmProtocol';
+// ---- LLM providers ----
+export { OpenAIProvider } from './providers/openai';
+export { AnthropicProvider } from './providers/anthropic';
+export { GoogleProvider } from './providers/google';
 export type { LLMProvider, LLMResponse, ToolCall, ChatMessage } from './llmProtocol';
+export type { ProviderName, RetryOptions } from './providers/base';
+export { getContextWindowForModel, withRetry } from './providers/base';
+
+// ---- Embeddings (optional) ----
+export { OpenAIEmbeddingProvider, cosineSimilarity } from './providers/embeddings';
+export type { EmbeddingProvider } from './providers/embeddings';
+
+// ---- Pricing & Token Usage ----
+export {
+    type TokenUsage,
+    type ModelPricing,
+    getModelPricing,
+    setModelPricing,
+    estimateCost,
+    toTokenUsage,
+    mergeTokenUsage,
+} from './pricing';
 
 // ---- Storage helpers ----
 export { createFileBackend as createFileStorage } from './storage/fileBackend';
