@@ -52,6 +52,20 @@ export type { MCPServerConfig } from './mcpClient';
 // ---- Session manager (for direct access) ----
 export { SessionManager, Session } from './sessionCore';
 
+// ---- Errors ----
+export {
+    AgentError,
+    LLMError,
+    RateLimitError,
+    AuthenticationError,
+    ContextOverflowError,
+    ToolError,
+    ToolTimeoutError,
+    ToolExecutionError,
+    ValidationError,
+    ConfigurationError,
+} from './errors';
+
 // ---- Context helpers (for advanced usage) ----
 export {
     estimateTokens,

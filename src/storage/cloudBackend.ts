@@ -3,14 +3,11 @@
  *
  * Uses @aws-sdk/client-s3; set AGENT_STORAGE_BACKEND=cloud and configure bucket + credentials.
  * All methods are natively async — no sync stubs.
+ *
+ * The AWS SDK is loaded lazily via dynamic import so that consumers who never
+ * use cloud storage are not required to install @aws-sdk/client-s3.
  */
 
-import {
-    S3Client,
-    GetObjectCommand,
-    PutObjectCommand,
-    ListObjectsV2Command,
-} from '@aws-sdk/client-s3';
 import {
     SessionStore,
     MemoryStore,
@@ -18,6 +15,27 @@ import {
     ContextStore,
     StorageBackend,
 } from './protocols';
+
+// Lazy-loaded SDK references
+let _S3Client: any;
+let _GetObjectCommand: any;
+let _PutObjectCommand: any;
+let _ListObjectsV2Command: any;
+
+async function loadS3SDK() {
+    if (_S3Client) return;
+    try {
+        const sdk = await import('@aws-sdk/client-s3');
+        _S3Client = sdk.S3Client;
+        _GetObjectCommand = sdk.GetObjectCommand;
+        _PutObjectCommand = sdk.PutObjectCommand;
+        _ListObjectsV2Command = sdk.ListObjectsV2Command;
+    } catch {
+        throw new Error(
+            'Cloud storage requires @aws-sdk/client-s3. Install it with: npm install @aws-sdk/client-s3',
+        );
+    }
+}
 
 // Key prefixes
 const KEY_PREFIX = 'agent';
@@ -42,16 +60,16 @@ function configRegion(): string {
     );
 }
 
-function getClient(): { client: S3Client; bucket: string } {
+function getClient(): { client: any; bucket: string } {
     const bucket = configBucket();
     const endpoint = configEndpoint();
     const region = configRegion();
-    const opts: ConstructorParameters<typeof S3Client>[0] = {
+    const opts: Record<string, any> = {
         region,
         forcePathStyle: true,
     };
     if (endpoint) opts.endpoint = endpoint;
-    return { client: new S3Client(opts), bucket };
+    return { client: new _S3Client(opts), bucket };
 }
 
 function encode(data: any): Buffer {
@@ -71,18 +89,12 @@ async function streamToString(stream: any): Promise<string> {
 // ---------------------------------------------------------------------------
 
 export class CloudSessionStore implements SessionStore {
-    private _client: S3Client;
+    private _client: any;
     private _bucket: string;
 
-    constructor(client?: S3Client, bucket?: string) {
-        if (client && bucket) {
-            this._client = client;
-            this._bucket = bucket;
-        } else {
-            const c = getClient();
-            this._client = c.client;
-            this._bucket = c.bucket;
-        }
+    constructor(client: any, bucket: string) {
+        this._client = client;
+        this._bucket = bucket;
     }
 
     private _key(sessionId: string): string {
@@ -92,7 +104,7 @@ export class CloudSessionStore implements SessionStore {
     async get(sessionId: string): Promise<Record<string, any> | null> {
         try {
             const resp = await this._client.send(
-                new GetObjectCommand({ Bucket: this._bucket, Key: this._key(sessionId) }),
+                new _GetObjectCommand({ Bucket: this._bucket, Key: this._key(sessionId) }),
             );
             const body = await streamToString(resp.Body);
             return JSON.parse(body);
@@ -103,7 +115,7 @@ export class CloudSessionStore implements SessionStore {
 
     async put(sessionId: string, data: Record<string, any>): Promise<void> {
         await this._client.send(
-            new PutObjectCommand({
+            new _PutObjectCommand({
                 Bucket: this._bucket,
                 Key: this._key(sessionId),
                 Body: encode(data),
@@ -117,7 +129,7 @@ export class CloudSessionStore implements SessionStore {
         let continuationToken: string | undefined;
         do {
             const resp = await this._client.send(
-                new ListObjectsV2Command({
+                new _ListObjectsV2Command({
                     Bucket: this._bucket,
                     Prefix: SESSIONS_PREFIX,
                     ContinuationToken: continuationToken,
@@ -157,24 +169,18 @@ export class CloudSessionStore implements SessionStore {
 // ---------------------------------------------------------------------------
 
 export class CloudMemoryStore implements MemoryStore {
-    private _client: S3Client;
+    private _client: any;
     private _bucket: string;
 
-    constructor(client?: S3Client, bucket?: string) {
-        if (client && bucket) {
-            this._client = client;
-            this._bucket = bucket;
-        } else {
-            const c = getClient();
-            this._client = c.client;
-            this._bucket = c.bucket;
-        }
+    constructor(client: any, bucket: string) {
+        this._client = client;
+        this._bucket = bucket;
     }
 
     async load(): Promise<Record<string, any>[]> {
         try {
             const resp = await this._client.send(
-                new GetObjectCommand({ Bucket: this._bucket, Key: MEMORY_KEY }),
+                new _GetObjectCommand({ Bucket: this._bucket, Key: MEMORY_KEY }),
             );
             const body = await streamToString(resp.Body);
             const data = JSON.parse(body);
@@ -186,7 +192,7 @@ export class CloudMemoryStore implements MemoryStore {
 
     async save(items: Record<string, any>[]): Promise<void> {
         await this._client.send(
-            new PutObjectCommand({
+            new _PutObjectCommand({
                 Bucket: this._bucket,
                 Key: MEMORY_KEY,
                 Body: encode(items),
@@ -201,18 +207,12 @@ export class CloudMemoryStore implements MemoryStore {
 // ---------------------------------------------------------------------------
 
 export class CloudSkillStore implements SkillStore {
-    private _client: S3Client;
+    private _client: any;
     private _bucket: string;
 
-    constructor(client?: S3Client, bucket?: string) {
-        if (client && bucket) {
-            this._client = client;
-            this._bucket = bucket;
-        } else {
-            const c = getClient();
-            this._client = c.client;
-            this._bucket = c.bucket;
-        }
+    constructor(client: any, bucket: string) {
+        this._client = client;
+        this._bucket = bucket;
     }
 
     async listSkills(): Promise<string[]> {
@@ -220,7 +220,7 @@ export class CloudSkillStore implements SkillStore {
         let continuationToken: string | undefined;
         do {
             const resp = await this._client.send(
-                new ListObjectsV2Command({
+                new _ListObjectsV2Command({
                     Bucket: this._bucket,
                     Prefix: SKILLS_PREFIX,
                     ContinuationToken: continuationToken,
@@ -241,7 +241,7 @@ export class CloudSkillStore implements SkillStore {
         const key = `${SKILLS_PREFIX}${name}`;
         try {
             const resp = await this._client.send(
-                new GetObjectCommand({ Bucket: this._bucket, Key: key }),
+                new _GetObjectCommand({ Bucket: this._bucket, Key: key }),
             );
             const body = await streamToString(resp.Body);
             return JSON.parse(body);
@@ -256,18 +256,12 @@ export class CloudSkillStore implements SkillStore {
 // ---------------------------------------------------------------------------
 
 export class CloudContextStore implements ContextStore {
-    private _client: S3Client;
+    private _client: any;
     private _bucket: string;
 
-    constructor(client?: S3Client, bucket?: string) {
-        if (client && bucket) {
-            this._client = client;
-            this._bucket = bucket;
-        } else {
-            const c = getClient();
-            this._client = c.client;
-            this._bucket = c.bucket;
-        }
+    constructor(client: any, bucket: string) {
+        this._client = client;
+        this._bucket = bucket;
     }
 
     private _key(sessionId: string): string {
@@ -277,7 +271,7 @@ export class CloudContextStore implements ContextStore {
     async get(sessionId: string): Promise<Record<string, any> | null> {
         try {
             const resp = await this._client.send(
-                new GetObjectCommand({ Bucket: this._bucket, Key: this._key(sessionId) }),
+                new _GetObjectCommand({ Bucket: this._bucket, Key: this._key(sessionId) }),
             );
             const body = await streamToString(resp.Body);
             const data = JSON.parse(body);
@@ -291,7 +285,7 @@ export class CloudContextStore implements ContextStore {
 
     async set(sessionId: string, data: Record<string, any>): Promise<void> {
         await this._client.send(
-            new PutObjectCommand({
+            new _PutObjectCommand({
                 Bucket: this._bucket,
                 Key: this._key(sessionId),
                 Body: encode(data),
@@ -305,11 +299,13 @@ export class CloudContextStore implements ContextStore {
 // Factory
 // ---------------------------------------------------------------------------
 
-export function createCloudBackend(
-    client?: S3Client,
+export async function createCloudBackend(
+    client?: any,
     bucket?: string,
-): StorageBackend {
-    let c: S3Client;
+): Promise<StorageBackend> {
+    await loadS3SDK();
+
+    let c: any;
     let b: string;
     if (client && bucket) {
         c = client;

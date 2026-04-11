@@ -247,6 +247,9 @@ export class AgentInstance {
     private _mcpConfigs: MCPServerConfig[];
     private _mcpInitialized: boolean = false;
     private _mcpInitPromise: Promise<void> | null = null;
+    private _storageInitialized: boolean = false;
+    private _storageInitPromise: Promise<void> | null = null;
+    private _storageConfig?: AgentConfig['storage'];
 
     constructor(config: AgentConfig) {
         this._llm = config.llm!;
@@ -287,19 +290,16 @@ export class AgentInstance {
             this._systemPrompt += skillDescriptions(this._skills);
         }
 
-        // Storage & session manager
+        // Storage & session manager (cloud backend init is deferred since it's async)
+        this._storageConfig = config.storage;
         let storage: StorageBackend | undefined;
         if (config.storage) {
             if (config.storage.custom) {
-                // User-provided StorageBackend (e.g. @vercel/storage, Supabase)
                 storage = config.storage.custom;
-            } else if (config.storage.backend === 'cloud') {
-                // S3-compatible cloud backend (dynamic import to avoid requiring @aws-sdk when unused)
-                const { createCloudBackend } = require('./storage/cloudBackend');
-                storage = createCloudBackend();
             } else if (config.storage.backend === 'file') {
                 storage = createFileBackend({ sessionDir: config.storage.dir });
             }
+            // cloud backend is initialized lazily via initStorage()
         }
         this._sessionMgr = new SessionManager({
             store: storage?.sessionStore ?? undefined,
@@ -307,9 +307,39 @@ export class AgentInstance {
         if (storage?.memoryStore && this._memoryEnabled) {
             setMemoryStore(storage.memoryStore);
         }
+        this._storageInitialized = config.storage?.backend !== 'cloud';
 
         // MCP servers (connected lazily since connect is async)
         this._mcpConfigs = config.mcpServers ?? [];
+    }
+
+    /**
+     * Initialize cloud storage backend. Called lazily on first chat/stream,
+     * or can be called explicitly for eager initialization.
+     */
+    async initStorage(): Promise<void> {
+        if (this._storageInitialized) return;
+        if (this._storageInitPromise) return this._storageInitPromise;
+
+        this._storageInitPromise = (async () => {
+            try {
+                if (this._storageConfig?.backend === 'cloud') {
+                    const { createCloudBackend } = await import('./storage/cloudBackend');
+                    const storage = await createCloudBackend();
+                    this._sessionMgr = new SessionManager({
+                        store: storage.sessionStore,
+                    });
+                    if (storage.memoryStore && this._memoryEnabled) {
+                        setMemoryStore(storage.memoryStore);
+                    }
+                }
+            } catch (e: any) {
+                console.error('[AgentInstance] Cloud storage init failed:', e.message ?? e);
+            }
+            this._storageInitialized = true;
+        })();
+
+        return this._storageInitPromise;
     }
 
     /**
@@ -562,6 +592,7 @@ export class AgentInstance {
         userInput: string,
         history: Record<string, any>[],
     ): Promise<ChatResult> {
+        await this.initStorage();
         await this.initMCP();
         const sanitized = sanitizeUserInput(userInput);
         const message = sanitized.text;
@@ -691,6 +722,7 @@ export class AgentInstance {
         history: Record<string, any>[],
         onComplete?: (result: ChatResult) => void,
     ): AsyncGenerator<StreamChunk> {
+        await this.initStorage();
         await this.initMCP();
         const sanitized = sanitizeUserInput(userInput);
         const message = sanitized.text;

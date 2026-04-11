@@ -296,7 +296,7 @@ async function syncSession(
 
 export async function main(): Promise<void> {
     setupAgentLogging();
-    const backend = getStorageBackend();
+    const backend = await getStorageBackend();
     const sessionMgr = new SessionManager({ store: backend.sessionStore });
     setMemoryStore(backend.memoryStore);
     SKILLS.setStore(backend.skillStore);
