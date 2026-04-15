@@ -89,6 +89,10 @@ export type {
     AgentMetricsSnapshot,
 } from './metrics';
 
+// ---- Composition root ----
+export { AgentHarness, ToolRegistry } from './harness';
+export type { HarnessConfig } from './harness';
+
 // ---- Tool execution ----
 export { ToolExecutor } from './toolExecutor';
 export type {

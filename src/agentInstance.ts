@@ -29,6 +29,7 @@ import { MCPManager, MCPServerConfig } from './mcpClient';
 import { ToolExecutor, ToolCallRequest } from './toolExecutor';
 import { Telemetry } from './telemetry';
 import { MetricsCollector } from './metrics';
+import { AgentHarness } from './harness';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -246,14 +247,15 @@ export class AgentInstance {
         args: Record<string, any>,
     ) => Promise<boolean> | boolean;
     private _humanInputCallback?: (question: string) => Promise<string> | string;
-    private _sandbox: Sandbox;
-    private _telemetry: Telemetry;
-    private _metrics: MetricsCollector;
-    private _toolExecutor!: ToolExecutor;
-    private _mcpManager: MCPManager | null = null;
-    private _mcpConfigs: MCPServerConfig[];
-    private _mcpInitialized: boolean = false;
-    private _mcpInitPromise: Promise<void> | null = null;
+    private _harness!: AgentHarness;
+
+    // Convenience accessors that delegate to the harness. Kept private so
+    // callers either go through the public API or grab the harness directly.
+    private get _sandbox(): Sandbox { return this._harness.sandbox; }
+    private get _telemetry(): Telemetry { return this._harness.telemetry; }
+    private get _metrics(): MetricsCollector { return this._harness.metrics; }
+    private get _toolExecutor(): ToolExecutor { return this._harness.toolExecutor; }
+    private get _mcpManager(): MCPManager | null { return this._harness.mcpManager; }
     private _storageInitialized: boolean = false;
     private _storageInitPromise: Promise<void> | null = null;
     private _storageConfig?: AgentConfig['storage'];
@@ -261,9 +263,6 @@ export class AgentInstance {
     constructor(config: AgentConfig) {
         this._llm = config.llm!;
         this._maxToolRounds = config.maxToolRounds ?? 20;
-        this._sandbox = new Sandbox(config.sandbox);
-        this._telemetry = config.telemetry ?? Telemetry.noop();
-        this._metrics = new MetricsCollector();
         this._memoryEnabled = config.enableMemory ?? false;
         this._streamingEnabled = config.enableStreaming ?? false;
         this._contextEnabled = config.enableContext ?? true;
@@ -287,13 +286,18 @@ export class AgentInstance {
         // Human-in-the-loop tool
         this._tools.push(this._buildAskUserTool());
 
-        // Build lookup and OpenAI format
-        this._toolMap = new Map(this._tools.map((t) => [t.name, t]));
-        this._openaiTools = toolDefsToOpenAI(this._tools);
-        this._toolExecutor = new ToolExecutor(this._toolMap, this._sandbox, {
-            telemetry: this._telemetry,
-            metrics: this._metrics,
+        // Build the harness (composition root for sandbox / executor / telemetry / metrics / mcp).
+        this._harness = new AgentHarness({
+            llm: this._llm,
+            tools: this._tools,
+            sandbox: config.sandbox,
+            telemetry: config.telemetry,
+            mcpServers: config.mcpServers ?? [],
         });
+
+        // Tool lookup and OpenAI format (mirror the harness registry for the LLM payload).
+        this._toolMap = this._harness.toolRegistry.asMap();
+        this._openaiTools = toolDefsToOpenAI(this._tools);
 
         // System prompt
         this._systemPrompt =
@@ -321,9 +325,6 @@ export class AgentInstance {
             setMemoryStore(storage.memoryStore);
         }
         this._storageInitialized = config.storage?.backend !== 'cloud';
-
-        // MCP servers (connected lazily since connect is async)
-        this._mcpConfigs = config.mcpServers ?? [];
     }
 
     /**
@@ -358,36 +359,28 @@ export class AgentInstance {
     /**
      * Initialize MCP server connections. Called lazily on first chat/stream,
      * or can be called explicitly for eager initialization.
+     *
+     * The harness owns the MCPManager; we still need to merge the discovered
+     * MCP tool descriptors into the LLM-facing `_openaiTools` payload here,
+     * since that's the surface the agent loop hands to the provider.
      */
     async initMCP(): Promise<void> {
-        if (this._mcpInitialized || !this._mcpConfigs.length) return;
-        if (this._mcpInitPromise) return this._mcpInitPromise;
-
-        this._mcpInitPromise = (async () => {
-            try {
-                this._mcpManager = new MCPManager();
-                await this._mcpManager.connect(this._mcpConfigs);
-
-                // Merge MCP tools into the agent's tool list
-                const mcpToolDefs = this._mcpManager.getToolDefinitions();
-                for (const mcpTool of mcpToolDefs) {
-                    this._openaiTools.push({
-                        type: 'function',
-                        function: {
-                            name: mcpTool.name,
-                            description: mcpTool.description,
-                            parameters: mcpTool.input_schema,
-                        },
-                    });
-                }
-            } catch (e: any) {
-                console.error('[AgentInstance] MCP connection failed, continuing without MCP tools:', e.message ?? e);
-                this._mcpManager = null;
+        if (!this._harness.mcpConfigs.length) return;
+        const wasConnected = this._harness.mcpManager !== null;
+        await this._harness.initMCP();
+        const mgr = this._harness.mcpManager;
+        if (mgr && !wasConnected) {
+            for (const mcpTool of mgr.getToolDefinitions()) {
+                this._openaiTools.push({
+                    type: 'function',
+                    function: {
+                        name: mcpTool.name,
+                        description: mcpTool.description,
+                        parameters: mcpTool.input_schema,
+                    },
+                });
             }
-            this._mcpInitialized = true;
-        })();
-
-        return this._mcpInitPromise;
+        }
     }
 
     // ---- Public API ----
@@ -467,12 +460,15 @@ export class AgentInstance {
      * Call this when the agent is no longer needed to release resources.
      */
     async close(): Promise<void> {
-        if (this._mcpManager) {
-            await this._mcpManager.close();
-            this._mcpManager = null;
-            this._mcpInitialized = false;
-            this._mcpInitPromise = null;
-        }
+        await this._harness.close();
+    }
+
+    /**
+     * The underlying composition root. Exposed for advanced use (custom
+     * tool execution, observability, sharing telemetry across agents).
+     */
+    get harness(): AgentHarness {
+        return this._harness;
     }
 
     // ---- Session wrapper ----
