@@ -17,6 +17,8 @@ import {
     ToolTimeoutError,
     ToolExecutionError,
 } from './errors';
+import { Telemetry } from './telemetry';
+import { MetricsCollector } from './metrics';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -70,6 +72,10 @@ export interface ToolExecutorOptions {
     defaultTimeoutMs?: number;
     /** Hard ceiling for any single tool. Default: 10 minutes. */
     maxTimeoutMs?: number;
+    /** Optional telemetry instance. Spans are emitted as `tool.<name>`. */
+    telemetry?: Telemetry;
+    /** Optional metrics collector. */
+    metrics?: MetricsCollector;
 }
 
 // ---------------------------------------------------------------------------
@@ -84,6 +90,8 @@ export class ToolExecutor {
     private readonly _sandbox: Sandbox;
     private readonly _defaultTimeoutMs: number;
     private readonly _maxTimeoutMs: number;
+    private readonly _telemetry: Telemetry;
+    private readonly _metrics?: MetricsCollector;
 
     constructor(
         toolMap: Map<string, ToolDefinition>,
@@ -94,6 +102,8 @@ export class ToolExecutor {
         this._sandbox = sandbox;
         this._defaultTimeoutMs = options.defaultTimeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS;
         this._maxTimeoutMs = options.maxTimeoutMs ?? MAX_TOOL_TIMEOUT_MS;
+        this._telemetry = options.telemetry ?? Telemetry.noop();
+        this._metrics = options.metrics;
     }
 
     /**
@@ -178,8 +188,15 @@ export class ToolExecutor {
     ): Promise<ToolCallResult> {
         const startedAt = Date.now();
         ctx.onToolStart?.(req);
+        const span = this._telemetry.startSpan(`tool.${req.name}`, {
+            attributes: { 'agent.tool.name': req.name, 'agent.tool.id': req.id },
+        });
 
         const finalize = (r: ToolCallResult): ToolCallResult => {
+            this._telemetry.recordToolCall(span, r.name, r.durationMs, r.success, r.errorCode);
+            span.end();
+            this._metrics?.recordToolCall(r.name, r.durationMs, r.success);
+            if (!r.success) this._metrics?.recordError(r.errorCode ?? 'UNKNOWN');
             ctx.onToolEnd?.(r);
             return r;
         };

@@ -71,6 +71,24 @@ export type { MCPServerConfig } from './mcpClient';
 // ---- Session manager (for direct access) ----
 export { SessionManager, Session } from './sessionCore';
 
+// ---- Telemetry & metrics ----
+export { Telemetry, ConsoleExporter, MemoryExporter } from './telemetry';
+export type {
+    Span,
+    SpanData,
+    SpanStatus,
+    LogEntry,
+    LogLevel,
+    TelemetryExporter,
+    TelemetryConfig,
+} from './telemetry';
+export { MetricsCollector } from './metrics';
+export type {
+    TurnMetrics,
+    ToolMetrics,
+    AgentMetricsSnapshot,
+} from './metrics';
+
 // ---- Tool execution ----
 export { ToolExecutor } from './toolExecutor';
 export type {

@@ -27,6 +27,8 @@ import { toTokenUsage, mergeTokenUsage, estimateCost, type TokenUsage } from './
 import { Sandbox } from './sandbox';
 import { MCPManager, MCPServerConfig } from './mcpClient';
 import { ToolExecutor, ToolCallRequest } from './toolExecutor';
+import { Telemetry } from './telemetry';
+import { MetricsCollector } from './metrics';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -245,6 +247,8 @@ export class AgentInstance {
     ) => Promise<boolean> | boolean;
     private _humanInputCallback?: (question: string) => Promise<string> | string;
     private _sandbox: Sandbox;
+    private _telemetry: Telemetry;
+    private _metrics: MetricsCollector;
     private _toolExecutor!: ToolExecutor;
     private _mcpManager: MCPManager | null = null;
     private _mcpConfigs: MCPServerConfig[];
@@ -258,6 +262,8 @@ export class AgentInstance {
         this._llm = config.llm!;
         this._maxToolRounds = config.maxToolRounds ?? 20;
         this._sandbox = new Sandbox(config.sandbox);
+        this._telemetry = config.telemetry ?? Telemetry.noop();
+        this._metrics = new MetricsCollector();
         this._memoryEnabled = config.enableMemory ?? false;
         this._streamingEnabled = config.enableStreaming ?? false;
         this._contextEnabled = config.enableContext ?? true;
@@ -284,7 +290,10 @@ export class AgentInstance {
         // Build lookup and OpenAI format
         this._toolMap = new Map(this._tools.map((t) => [t.name, t]));
         this._openaiTools = toolDefsToOpenAI(this._tools);
-        this._toolExecutor = new ToolExecutor(this._toolMap, this._sandbox);
+        this._toolExecutor = new ToolExecutor(this._toolMap, this._sandbox, {
+            telemetry: this._telemetry,
+            metrics: this._metrics,
+        });
 
         // System prompt
         this._systemPrompt =
@@ -430,6 +439,16 @@ export class AgentInstance {
     /** Get the list of registered tools. */
     get tools(): ToolDefinition[] {
         return [...this._tools];
+    }
+
+    /** Get the telemetry instance (no-op by default). */
+    get telemetry(): Telemetry {
+        return this._telemetry;
+    }
+
+    /** Snapshot of agent metrics: turns, tool calls, errors, tokens, cost. */
+    getMetrics() {
+        return this._metrics.getMetrics();
     }
 
     /**
@@ -585,11 +604,17 @@ export class AgentInstance {
 
         let ragLines: string[] | undefined;
         if (this._memoryEnabled) {
+            const span = this._telemetry.startSpan('memory.retrieve');
             try {
                 const memories = await retrieve(userInput, 5);
                 ragLines = memories.map((m) => m[0]).filter(Boolean);
+                this._telemetry.recordMemoryRetrieval(span, memories.length, memories.map((m) => m[1]));
             } catch (e: any) {
+                span.setStatus('error', e?.message ?? String(e));
+                this._telemetry.warn('memory', 'Memory retrieval failed', { error: e?.message ?? String(e) });
                 console.error('[AgentInstance] Memory retrieval failed, continuing without memories:', e.message ?? e);
+            } finally {
+                span.end();
             }
         }
 
@@ -602,6 +627,33 @@ export class AgentInstance {
     private async _runLoop(
         userInput: string,
         history: Record<string, any>[],
+    ): Promise<ChatResult> {
+        return this._telemetry.withSpan('agent.turn', async (turnSpan) => {
+            const turnStart = Date.now();
+            const result = await this._runLoopInner(userInput, history, turnSpan);
+            this._metrics.recordTurn({
+                turnNumber: this._metrics.getMetrics().turnCount + 1,
+                hadToolCalls: result.hadToolCalls,
+                toolCallCount: 0,
+                inputTokens: result.usage?.inputTokens ?? 0,
+                outputTokens: result.usage?.outputTokens ?? 0,
+                durationMs: Date.now() - turnStart,
+                estimatedCost: result.estimatedCost,
+                timestamp: Date.now(),
+            });
+            turnSpan.setAttributes({
+                'agent.turn.input_tokens': result.usage?.inputTokens ?? 0,
+                'agent.turn.output_tokens': result.usage?.outputTokens ?? 0,
+                'agent.turn.had_tool_calls': result.hadToolCalls,
+            });
+            return result;
+        });
+    }
+
+    private async _runLoopInner(
+        userInput: string,
+        history: Record<string, any>[],
+        _turnSpan: import('./telemetry').Span,
     ): Promise<ChatResult> {
         await this.initStorage();
         await this.initMCP();
@@ -660,8 +712,13 @@ export class AgentInstance {
                 workingHistory.push(assistantMsg);
                 // #8: memory consolidation failure handling
                 if (this._memoryEnabled) {
+                    const cspan = this._telemetry.startSpan('memory.consolidate');
                     try { await consolidateTurn(message, content.trim()); }
-                    catch (e: any) { console.error('[AgentInstance] consolidateTurn failed:', e.message ?? e); }
+                    catch (e: any) {
+                        cspan.setStatus('error', e?.message ?? String(e));
+                        console.error('[AgentInstance] consolidateTurn failed:', e.message ?? e);
+                    }
+                    finally { cspan.end(); }
                 }
                 history.length = 0;
                 history.push(...workingHistory);
@@ -788,8 +845,13 @@ export class AgentInstance {
                 if (thinking) assistantMsg.thinking = thinking;
                 workingHistory.push(assistantMsg);
                 if (this._memoryEnabled) {
+                    const cspan = this._telemetry.startSpan('memory.consolidate');
                     try { await consolidateTurn(message, content.trim()); }
-                    catch (e: any) { console.error('[AgentInstance] consolidateTurn failed:', e.message ?? e); }
+                    catch (e: any) {
+                        cspan.setStatus('error', e?.message ?? String(e));
+                        console.error('[AgentInstance] consolidateTurn failed:', e.message ?? e);
+                    }
+                    finally { cspan.end(); }
                 }
                 history.length = 0;
                 history.push(...workingHistory);
@@ -853,15 +915,49 @@ export class AgentInstance {
         maxRetries: number = 3,
     ): Promise<LLMResponse | AsyncGenerator<LLMResponse>> {
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            const span = this._telemetry.startSpan('llm.chat', {
+                attributes: {
+                    'gen_ai.operation.name': 'chat',
+                    'llm.attempt': attempt,
+                    'llm.stream': stream,
+                    'llm.message_count': apiMessages.length,
+                },
+            });
+            const startedAt = Date.now();
             try {
-                return this._llm.chat(apiMessages, {
+                const result = this._llm.chat(apiMessages, {
                     tools: this._openaiTools,
                     maxTokens: 8000,
                     stream,
                 });
+                // For non-streaming we can record usage once the promise settles.
+                if (!stream) {
+                    const resp = await (result as Promise<LLMResponse>);
+                    if (resp.usage) {
+                        this.telemetry.recordChat(
+                            span,
+                            resp.model ?? '',
+                            {
+                                input: (resp.usage as any).input_tokens ?? (resp.usage as any).inputTokens,
+                                output: (resp.usage as any).output_tokens ?? (resp.usage as any).outputTokens,
+                            },
+                            Date.now() - startedAt,
+                        );
+                    }
+                    span.end();
+                    return resp;
+                }
+                // Streaming: end span when generator is exhausted (best-effort).
+                span.setAttribute('llm.duration_ms_initiated', Date.now() - startedAt);
+                span.end();
+                return result as AsyncGenerator<LLMResponse>;
             } catch (e: any) {
                 const status = e?.status ?? e?.response?.status;
                 const retryable = [429, 500, 502, 503].includes(status);
+                span.setStatus('error', e?.message ?? String(e));
+                span.setAttribute('error.code', String(status ?? 'unknown'));
+                span.end();
+                this._metrics.recordError(`LLM_${status ?? 'ERROR'}`);
                 if (attempt < maxRetries && retryable) {
                     await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt - 1)));
                     continue;

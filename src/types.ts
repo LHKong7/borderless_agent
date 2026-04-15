@@ -165,6 +165,12 @@ export interface AgentConfig {
      * When not set, memory retrieval uses keyword-based scoring only.
      */
     embeddingProvider?: EmbeddingProvider;
+    /**
+     * Optional telemetry instance. If omitted, a no-op telemetry is used
+     * (zero overhead). Construct with `new Telemetry({ exporter: ... })`
+     * and pass in to enable spans, logs, and GenAI semantic attributes.
+     */
+    telemetry?: import('./telemetry').Telemetry;
 }
 
 // ---------------------------------------------------------------------------
