@@ -89,6 +89,16 @@ export type {
     AgentMetricsSnapshot,
 } from './metrics';
 
+// ---- Context assembly ----
+export { ContextBuilder, SourceRegistry } from './contextBuilder';
+export type {
+    ContextSource,
+    SourceCategory,
+    AssembleResult,
+    ContextBuilderOptions,
+    BuildContextResult,
+} from './contextBuilder';
+
 // ---- Composition root ----
 export { AgentHarness, ToolRegistry } from './harness';
 export type { HarnessConfig } from './harness';

@@ -20,6 +20,7 @@ import { AutonomousLoop } from './autonomousLoop';
 import { LLMProvider, LLMResponse, ToolCall } from './llmProtocol';
 import { SessionManager, Session } from './sessionCore';
 import { LifecycleManager, getBudget, selectHistory, assembleSystem, sanitizeUserInput, foldObservation, contextEnabled as envContextEnabled } from './contextCore';
+import { ContextBuilder } from './contextBuilder';
 import { retrieve, consolidateTurn, writeInsight, setMemoryStore, MEMORY_ENABLED } from './memoryCore';
 import { createFileBackend } from './storage/fileBackend';
 import { StorageBackend } from './storage/protocols';
@@ -598,26 +599,31 @@ export class AgentInstance {
     private async _buildSystemForTurn(userInput: string): Promise<string> {
         if (!this._contextEnabled) return this._systemPrompt;
 
-        let ragLines: string[] | undefined;
-        if (this._memoryEnabled) {
-            const span = this._telemetry.startSpan('memory.retrieve');
-            try {
-                const memories = await retrieve(userInput, 5);
-                ragLines = memories.map((m) => m[0]).filter(Boolean);
-                this._telemetry.recordMemoryRetrieval(span, memories.length, memories.map((m) => m[1]));
-            } catch (e: any) {
-                span.setStatus('error', e?.message ?? String(e));
-                this._telemetry.warn('memory', 'Memory retrieval failed', { error: e?.message ?? String(e) });
-                console.error('[AgentInstance] Memory retrieval failed, continuing without memories:', e.message ?? e);
-            } finally {
-                span.end();
-            }
-        }
+        const budget = getBudget();
+        // Reserve the per-turn system budget separately so RAG and project
+        // knowledge live within their own slice of the input window.
+        const systemBudget = budget.system + Math.floor(budget.rag);
 
-        return assembleSystem({
-            baseSystem: this._systemPrompt,
-            ragLines: ragLines?.length ? ragLines : undefined,
+        const builder = new ContextBuilder({
+            baseSystemPrompt: this._systemPrompt,
+            includeProjectKnowledge: true,
+            includeMemory: this._memoryEnabled,
+            telemetry: this._telemetry,
         });
+
+        try {
+            const result = await builder.build(userInput, systemBudget);
+            this._telemetry.debug('context', 'system assembled', {
+                tokensUsed: result.tokensUsed,
+                included: result.included,
+                truncated: result.truncated,
+                dropped: result.dropped,
+            });
+            return result.text || this._systemPrompt;
+        } catch (e: any) {
+            this._telemetry.warn('context', 'context assembly failed; falling back to base system prompt', { error: e?.message ?? String(e) });
+            return this._systemPrompt;
+        }
     }
 
     private async _runLoop(
