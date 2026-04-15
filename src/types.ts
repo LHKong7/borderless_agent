@@ -60,6 +60,18 @@ export interface ToolDefinition {
      * 'safe' = read-only, 'moderate' = file mods, 'dangerous' = execution, 'critical' = unrestricted.
      */
     permissionLevel?: 'safe' | 'moderate' | 'dangerous' | 'critical';
+    /**
+     * Per-tool execution timeout in ms. Falls back to the executor default
+     * (60s) when omitted. Capped at 10 minutes by the executor.
+     */
+    timeout?: number;
+    /**
+     * Whether this tool can be safely executed in parallel with sibling
+     * tool calls in the same round. Defaults to `true`. Set to `false`
+     * for tools with shared mutable state (e.g. an interactive REPL).
+     * Tools with `requiresApproval: true` are always serialized regardless.
+     */
+    concurrencySafe?: boolean;
 }
 
 // ---------------------------------------------------------------------------

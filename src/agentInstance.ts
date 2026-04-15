@@ -26,6 +26,7 @@ import { StorageBackend } from './storage/protocols';
 import { toTokenUsage, mergeTokenUsage, estimateCost, type TokenUsage } from './pricing';
 import { Sandbox } from './sandbox';
 import { MCPManager, MCPServerConfig } from './mcpClient';
+import { ToolExecutor, ToolCallRequest } from './toolExecutor';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -244,6 +245,7 @@ export class AgentInstance {
     ) => Promise<boolean> | boolean;
     private _humanInputCallback?: (question: string) => Promise<string> | string;
     private _sandbox: Sandbox;
+    private _toolExecutor!: ToolExecutor;
     private _mcpManager: MCPManager | null = null;
     private _mcpConfigs: MCPServerConfig[];
     private _mcpInitialized: boolean = false;
@@ -282,6 +284,7 @@ export class AgentInstance {
         // Build lookup and OpenAI format
         this._toolMap = new Map(this._tools.map((t) => [t.name, t]));
         this._openaiTools = toolDefsToOpenAI(this._tools);
+        this._toolExecutor = new ToolExecutor(this._toolMap, this._sandbox);
 
         // System prompt
         this._systemPrompt =
@@ -524,50 +527,57 @@ export class AgentInstance {
 
     // ---- Internal agent loop ----
 
-    private async _executeTool(
-        name: string,
-        args: Record<string, any>,
-    ): Promise<string> {
-        // Route MCP tools to MCPManager
-        if (this._mcpManager?.isMCPTool(name)) {
+    /**
+     * Execute a batch of tool calls using the parallel-aware ToolExecutor.
+     * Returns observations in the **original order** of `tcs`, ready to be
+     * folded back into the conversation history.
+     */
+    private async _executeToolBatch(
+        tcs: ToolCallMsg[],
+    ): Promise<{ tool_call_id: string; content: string }[]> {
+        const requests: ToolCallRequest[] = [];
+        const failures: { tool_call_id: string; content: string }[] = [];
+        const indexById = new Map<string, number>();
+
+        // Parse arguments up-front so parse failures don't make it to the executor.
+        for (const tc of tcs) {
+            let args: Record<string, any>;
             try {
-                return await this._mcpManager.callTool(name, args);
-            } catch (e: any) {
-                return `[MCP tool error] ${name}: ${e.message ?? String(e)}`;
+                args = JSON.parse(tc.function.arguments || '{}');
+            } catch {
+                failures.push({
+                    tool_call_id: tc.id,
+                    content: `[ARG_PARSE_ERROR] Could not parse arguments for tool "${tc.function.name}". Raw: ${(tc.function.arguments || '').slice(0, 200)}`,
+                });
+                continue;
             }
+            indexById.set(tc.id, requests.length);
+            requests.push({ id: tc.id, name: tc.function.name, arguments: args });
         }
 
-        const tool = this._toolMap.get(name);
-        if (!tool) return `Unknown tool: ${name}`;
+        const results = requests.length
+            ? await this._toolExecutor.executeAll(requests, {
+                  approvalCallback: this._approvalCallback,
+                  mcpRouter: this._mcpManager,
+              })
+            : [];
 
-        // Sandbox permission check (handles file guards, command analysis, etc.)
-        const decision = this._sandbox.checkPermission(name, args);
-
-        if (decision.behavior === 'deny') {
-            return decision.message || 'Operation blocked by sandbox';
-        }
-
-        if (decision.behavior === 'ask') {
-            // If approval callback is set, delegate to it
-            if (this._approvalCallback) {
-                const approved = await this._approvalCallback(name, args);
-                if (!approved) return 'Action not approved by user.';
-            } else {
-                // No callback and sandbox says ask — deny by default
-                return decision.message || 'Operation requires confirmation but no approval callback set';
+        // Reassemble in input order.
+        const out: { tool_call_id: string; content: string }[] = [];
+        for (const tc of tcs) {
+            const failure = failures.find((f) => f.tool_call_id === tc.id);
+            if (failure) {
+                out.push(failure);
+                continue;
             }
+            const idx = indexById.get(tc.id);
+            const r = idx !== undefined ? results[idx] : undefined;
+            out.push({
+                tool_call_id: tc.id,
+                content: r ? r.output : `[Tool error] ${tc.function.name}: missing result`,
+            });
         }
-
-        // Legacy requiresApproval check (for user-defined tools)
-        if (tool.requiresApproval && this._approvalCallback && decision.behavior === 'allow') {
-            const approved = await this._approvalCallback(name, args);
-            if (!approved) return 'Action not approved by user.';
-        }
-
-        // Execute with sandbox timeout & output limits
-        return this._sandbox.wrapExecution(async () => {
-            return await tool.execute(args);
-        });
+        return out;
     }
 
     private async _buildSystemForTurn(userInput: string): Promise<string> {
@@ -676,31 +686,10 @@ export class AgentInstance {
                 return { reply: msg, history: workingHistory, hadToolCalls, usage: accumulatedUsage };
             }
 
-            // Execute tools
-            const results: { tool_call_id: string; content: string }[] = [];
-            for (const tc of tcs) {
-                let args: Record<string, any>;
-                try {
-                    args = JSON.parse(tc.function.arguments || '{}');
-                } catch {
-                    // #15: inform LLM about parse failure instead of silent {}
-                    results.push({
-                        tool_call_id: tc.id,
-                        content: `[Argument parse error] Could not parse arguments for tool "${tc.function.name}". Raw: ${(tc.function.arguments || '').slice(0, 200)}`,
-                    });
-                    continue;
-                }
-                // #4: tool execution try-catch
-                let output: string;
-                try {
-                    output = await this._executeTool(tc.function.name, args);
-                } catch (e: any) {
-                    output = `[Tool error] ${tc.function.name}: ${e.message ?? String(e)}`;
-                }
-                if (this._contextEnabled) {
-                    output = foldObservation(output);
-                }
-                results.push({ tool_call_id: tc.id, content: output });
+            // Execute tools (parallel-safe ones in parallel via ToolExecutor)
+            const results = await this._executeToolBatch(tcs);
+            if (this._contextEnabled) {
+                for (const r of results) r.content = foldObservation(r.content);
             }
 
             // Append to conversation (preserve thinking if present)
@@ -828,27 +817,10 @@ export class AgentInstance {
                 return;
             }
 
-            // Execute tools (non-streaming phase)
-            const results: { tool_call_id: string; content: string }[] = [];
-            for (const tc of tcs) {
-                let args: Record<string, any>;
-                try {
-                    args = JSON.parse(tc.function.arguments || '{}');
-                } catch {
-                    results.push({
-                        tool_call_id: tc.id,
-                        content: `[Argument parse error] Could not parse arguments for tool "${tc.function.name}". Raw: ${(tc.function.arguments || '').slice(0, 200)}`,
-                    });
-                    continue;
-                }
-                let output: string;
-                try {
-                    output = await this._executeTool(tc.function.name, args);
-                } catch (e: any) {
-                    output = `[Tool error] ${tc.function.name}: ${e.message ?? String(e)}`;
-                }
-                if (this._contextEnabled) output = foldObservation(output);
-                results.push({ tool_call_id: tc.id, content: output });
+            // Execute tools (non-streaming phase, parallel-safe ones in parallel)
+            const results = await this._executeToolBatch(tcs);
+            if (this._contextEnabled) {
+                for (const r of results) r.content = foldObservation(r.content);
             }
 
             const assistantToolMsg: Record<string, any> = {

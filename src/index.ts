@@ -71,6 +71,16 @@ export type { MCPServerConfig } from './mcpClient';
 // ---- Session manager (for direct access) ----
 export { SessionManager, Session } from './sessionCore';
 
+// ---- Tool execution ----
+export { ToolExecutor } from './toolExecutor';
+export type {
+    ToolCallRequest,
+    ToolCallResult,
+    ExecutionPlan,
+    ToolExecutorContext,
+    ToolExecutorOptions,
+} from './toolExecutor';
+
 // ---- Errors ----
 export {
     AgentError,
