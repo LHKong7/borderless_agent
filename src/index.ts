@@ -111,6 +111,12 @@ export type {
 export { AgentHarness, ToolRegistry } from './harness';
 export type { HarnessConfig } from './harness';
 
+// ---- Skills (registry + lifecycle) ----
+export { SkillRegistry } from './skillRegistry';
+export { SkillLifecycleManager } from './skillLifecycle';
+export type { SkillContext } from './types';
+export type { SkillLoadResult, SkillLifecycleManagerOptions } from './skillLifecycle';
+
 // ---- Tool execution ----
 export { ToolExecutor } from './toolExecutor';
 export type {

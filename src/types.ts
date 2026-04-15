@@ -95,6 +95,34 @@ export interface SkillDefinition {
     description: string;
     /** Markdown body injected into context when the skill is loaded. */
     body: string;
+    // ---- Optional metadata (PR6) -----------------------------------------
+    /** Semantic version. Default: '1.0.0'. */
+    version?: string;
+    /** Free-form tags. Used by SkillRegistry.search and listByTag. */
+    tags?: string[];
+    /** Logical categories. Used by SkillRegistry.listByCategory. */
+    categories?: string[];
+    /** Names of skills this skill depends on. Auto-loaded transitively. */
+    dependencies?: string[];
+    /**
+     * Auto-trigger pattern. When the user input matches the string
+     * (substring) or RegExp, SkillLifecycleManager.matchTriggers will
+     * surface this skill so the loop can auto-load it.
+     */
+    trigger?: string | RegExp;
+    /** Few-shot examples shown alongside the description when relevant. */
+    examples?: { description?: string; input: string; output: string }[];
+    /** Hook fired when the skill is first loaded into a session. */
+    onLoad?: (ctx: SkillContext) => Promise<void> | void;
+    /** Hook fired when the skill is unloaded. */
+    onUnload?: (ctx: SkillContext) => Promise<void> | void;
+}
+
+/** Context passed to skill lifecycle hooks. */
+export interface SkillContext {
+    sessionId?: string;
+    /** Free-form scratch area shared between onLoad / onUnload calls. */
+    scratch: Record<string, any>;
 }
 
 // ---------------------------------------------------------------------------

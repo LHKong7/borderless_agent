@@ -31,6 +31,8 @@ import { ToolExecutor, ToolCallRequest } from './toolExecutor';
 import { Telemetry } from './telemetry';
 import { MetricsCollector } from './metrics';
 import { AgentHarness } from './harness';
+import { SkillRegistry } from './skillRegistry';
+import { SkillLifecycleManager } from './skillLifecycle';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -63,28 +65,70 @@ function skillDescriptions(skills: SkillDefinition[]): string {
     );
 }
 
-/** Build the Skill meta-tool for user-defined skills */
-function buildSkillTool(skills: SkillDefinition[]): ToolDefinition | null {
-    if (!skills.length) return null;
-    const loadedSkills = new Set<string>();
+/** Build the Skill meta-tool backed by a SkillLifecycleManager */
+function buildSkillTool(manager: SkillLifecycleManager): ToolDefinition | null {
+    if (!manager.registry.list().length) return null;
+    const describeAvailable = () =>
+        manager.registry.list().map((s) => `- ${s.name}: ${s.description}`).join('\n');
     return {
         name: 'Skill',
         description:
-            'Load a skill for specialized knowledge.\nAvailable:\n' +
-            skills.map((s) => `- ${s.name}: ${s.description}`).join('\n'),
-        parameters: { skill: { type: 'string', description: 'Skill name to load' } },
+            'Load / unload / inspect skills for specialised knowledge.\n' +
+            'Actions: load (default) | unload | list | search | info\n\n' +
+            'Available:\n' + describeAvailable(),
+        parameters: {
+            skill: { type: 'string', description: 'Skill name (or search query for action=search)' },
+            action: {
+                type: 'string',
+                description: 'load | unload | list | search | info (default: load)',
+                enum: ['load', 'unload', 'list', 'search', 'info'],
+            },
+        },
         required: ['skill'],
-        execute: (args) => {
-            const name = args.skill;
-            if (loadedSkills.has(name)) {
-                return `(Skill '${name}' already loaded. Use the knowledge above.)`;
+        execute: async (args) => {
+            const action = (args.action ?? 'load') as string;
+            const name = args.skill ?? '';
+            switch (action) {
+                case 'list': {
+                    const all = manager.registry.list();
+                    if (!all.length) return '(no skills available)';
+                    return all.map((s) => `- ${s.name}: ${s.description}`).join('\n');
+                }
+                case 'search': {
+                    const hits = manager.registry.search(name);
+                    if (!hits.length) return `No skills matching '${name}'.`;
+                    return hits.map((s) => `- ${s.name}: ${s.description}`).join('\n');
+                }
+                case 'info': {
+                    const s = manager.registry.get(name);
+                    if (!s) return `Skill '${name}' not found.`;
+                    return [
+                        `## ${s.name} (v${s.version ?? '1.0.0'})`,
+                        s.description,
+                        s.tags?.length ? `Tags: ${s.tags.join(', ')}` : '',
+                        s.categories?.length ? `Categories: ${s.categories.join(', ')}` : '',
+                        s.dependencies?.length ? `Dependencies: ${s.dependencies.join(', ')}` : '',
+                    ].filter(Boolean).join('\n');
+                }
+                case 'unload': {
+                    await manager.unloadSkill(name);
+                    return `Unloaded skill '${name}'.`;
+                }
+                case 'load':
+                default: {
+                    if (manager.isLoaded(name)) {
+                        return `(Skill '${name}' already loaded. Use the knowledge in context.)`;
+                    }
+                    const r = await manager.loadSkill(name);
+                    if (!r.success) {
+                        return `Failed to load '${name}': ${r.error ?? 'unknown error'}. Available: ${manager.registry.list().map((s) => s.name).join(', ')}`;
+                    }
+                    const extras = r.loadedDependencies.length
+                        ? ` (also loaded dependencies: ${r.loadedDependencies.join(', ')})`
+                        : '';
+                    return `Loaded skill '${name}'${extras}. Knowledge is now active in context — do NOT call Skill again for this skill.`;
+                }
             }
-            const skill = skills.find((s) => s.name === name);
-            if (!skill) {
-                return `Error: Unknown skill '${name}'. Available: ${skills.map((s) => s.name).join(', ')}`;
-            }
-            loadedSkills.add(name);
-            return `<skill-loaded name="${name}">\n# Skill: ${skill.name}\n\n${skill.body}\n</skill-loaded>\n\nUse the knowledge above to complete the user's task. Do NOT call Skill again.`;
         },
     };
 }
@@ -249,6 +293,8 @@ export class AgentInstance {
     ) => Promise<boolean> | boolean;
     private _humanInputCallback?: (question: string) => Promise<string> | string;
     private _harness!: AgentHarness;
+    private _skillRegistry!: SkillRegistry;
+    private _skillManager!: SkillLifecycleManager;
 
     // Convenience accessors that delegate to the harness. Kept private so
     // callers either go through the public API or grab the harness directly.
@@ -279,10 +325,9 @@ export class AgentInstance {
             this._tools.push(...config.tools);
         }
 
-        // Skills
+        // Skills — registry + lifecycle manager
         this._skills = config.skills ?? [];
-        const skillTool = buildSkillTool(this._skills);
-        if (skillTool) this._tools.push(skillTool);
+        this._skillRegistry = new SkillRegistry(this._skills);
 
         // Human-in-the-loop tool
         this._tools.push(this._buildAskUserTool());
@@ -295,6 +340,19 @@ export class AgentInstance {
             telemetry: config.telemetry,
             mcpServers: config.mcpServers ?? [],
         });
+
+        // Lifecycle manager needs telemetry from the harness; build it after.
+        this._skillManager = new SkillLifecycleManager({
+            registry: this._skillRegistry,
+            telemetry: this._harness.telemetry,
+        });
+
+        // The Skill meta-tool is now backed by the lifecycle manager.
+        const skillTool = buildSkillTool(this._skillManager);
+        if (skillTool) {
+            this._tools.push(skillTool);
+            this._harness.toolRegistry.register(skillTool);
+        }
 
         // Tool lookup and OpenAI format (mirror the harness registry for the LLM payload).
         this._toolMap = this._harness.toolRegistry.asMap();
@@ -447,6 +505,12 @@ export class AgentInstance {
     getMetrics() {
         return this._metrics.getMetrics();
     }
+
+    /** SkillRegistry containing every registered skill (read-mostly). */
+    get skillRegistry(): SkillRegistry { return this._skillRegistry; }
+
+    /** Lifecycle manager for the active skill set (load / unload / triggers). */
+    get skillManager(): SkillLifecycleManager { return this._skillManager; }
 
     /**
      * Run an autonomous task loop.
@@ -611,6 +675,7 @@ export class AgentInstance {
             baseSystemPrompt: this._systemPrompt,
             includeProjectKnowledge: true,
             includeMemory: this._memoryEnabled,
+            activeSkills: this._skillManager.getActiveSkillBodies(),
             telemetry: this._telemetry,
         });
 
@@ -664,6 +729,9 @@ export class AgentInstance {
         await this.initMCP();
         const sanitized = sanitizeUserInput(userInput);
         const message = sanitized.text;
+        // Auto-load any skills whose triggers fire on this message; the
+        // freshly-loaded bodies will appear in the system prompt below.
+        await this._skillManager.autoLoadFromTriggers(message);
         const system = await this._buildSystemForTurn(message);
 
         // Trim history if context management enabled
@@ -787,6 +855,7 @@ export class AgentInstance {
         await this.initMCP();
         const sanitized = sanitizeUserInput(userInput);
         const message = sanitized.text;
+        await this._skillManager.autoLoadFromTriggers(message);
         const system = await this._buildSystemForTurn(message);
 
         let workingHistory = [...history];
