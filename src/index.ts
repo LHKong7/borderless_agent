@@ -46,6 +46,14 @@ export { getContextWindowForModel, withRetry } from './providers/base';
 // ---- Embeddings (optional) ----
 export { OpenAIEmbeddingProvider, cosineSimilarity } from './providers/embeddings';
 export type { EmbeddingProvider } from './providers/embeddings';
+export {
+    setEmbeddingProvider,
+    getEmbeddingProvider,
+    retrieve as retrieveMemories,
+    writeEvent as writeMemoryEvent,
+    writeInsight as writeMemoryInsight,
+} from './memoryCore';
+export type { RetrievalConfig } from './memoryCore';
 
 // ---- Pricing & Token Usage ----
 export {

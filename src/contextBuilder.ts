@@ -240,7 +240,7 @@ export class ContextBuilder {
             const tel = this._options.telemetry;
             const span = tel?.startSpan('memory.retrieve');
             try {
-                const memories = await retrieve(userInput, k);
+                const memories = await retrieve(userInput, k, { autoEnableEmbeddings: true });
                 if (memories.length) {
                     const lines = memories.map((m, i) => `[${i + 1}] ${m[0]}`).join('\n');
                     registry.register({

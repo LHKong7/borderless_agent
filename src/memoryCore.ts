@@ -13,6 +13,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { WORKDIR } from './config';
+import type { EmbeddingProvider } from './providers/embeddings';
+import { cosineSimilarity } from './providers/embeddings';
 
 // ---------------------------------------------------------------------------
 // MemoryStore interface (optional injection)
@@ -44,10 +46,33 @@ export const MAX_HISTORY_TURNS = 30;
 export const MAX_MEMORY_ITEMS = 500;
 export const MAX_MEMORY_AGE_DAYS = 90;
 
-// Retrieval weights
+// Retrieval weights — keyword-only profile (defaults).
 export const ALPHA_RECENCY = 0.25;
 export const BETA_IMPORTANCE = 0.35;
 export const GAMMA_RELEVANCE = 0.40;
+/** Default vector-similarity weight when an EmbeddingProvider is supplied. */
+export const DELTA_EMBEDDING = 0.0;
+
+// ---------------------------------------------------------------------------
+// Embedding provider (process-wide registration; opt-in)
+// ---------------------------------------------------------------------------
+
+let _embeddingProvider: EmbeddingProvider | null = null;
+
+/**
+ * Register the global embedding provider. When set, `writeEvent` /
+ * `writeInsight` will populate `embedding` on each new memory and
+ * `retrieve` will blend cosine similarity into the score.
+ *
+ * Pass `null` to disable.
+ */
+export function setEmbeddingProvider(provider: EmbeddingProvider | null): void {
+    _embeddingProvider = provider;
+}
+
+export function getEmbeddingProvider(): EmbeddingProvider | null {
+    return _embeddingProvider;
+}
 
 // ---------------------------------------------------------------------------
 // File helpers
@@ -245,16 +270,32 @@ function recencyScore(createdTs: number, now: number): number {
 // Core memory operations
 // ---------------------------------------------------------------------------
 
+async function tryEmbed(text: string): Promise<{ embedding: number[]; model: string } | null> {
+    const provider = _embeddingProvider;
+    if (!provider) return null;
+    try {
+        const out = await provider.embed([text]);
+        if (!out.length) return null;
+        return { embedding: out[0], model: provider.model };
+    } catch {
+        // Embedding is opt-in convenience; never block writes on failure.
+        return null;
+    }
+}
+
 export async function writeEvent(content: string, importance: number = 0.5): Promise<void> {
     const items = await loadMemories();
     const now = Date.now() / 1000;
+    const text = (content || '').trim().slice(0, 2000);
+    const emb = await tryEmbed(text);
     items.push({
         id: uuidv4(),
         type: 'episodic',
-        content: (content || '').trim().slice(0, 2000),
+        content: text,
         importance: Math.max(0, Math.min(1, importance)),
         created_at: now,
         last_accessed: now,
+        ...(emb ? { embedding: emb.embedding, embedding_model: emb.model } : {}),
     });
     await saveMemories(items);
 }
@@ -262,34 +303,87 @@ export async function writeEvent(content: string, importance: number = 0.5): Pro
 export async function writeInsight(content: string, importance: number = 0.6): Promise<void> {
     const items = await loadMemories();
     const now = Date.now() / 1000;
+    const text = (content || '').trim().slice(0, 2000);
+    const emb = await tryEmbed(text);
     items.push({
         id: uuidv4(),
         type: 'semantic',
-        content: (content || '').trim().slice(0, 2000),
+        content: text,
         importance: Math.max(0, Math.min(1, importance)),
         created_at: now,
         last_accessed: now,
+        ...(emb ? { embedding: emb.embedding, embedding_model: emb.model } : {}),
     });
     await saveMemories(items);
+}
+
+/**
+ * Retrieval config. Pass `delta > 0` and have `setEmbeddingProvider()`
+ * configured (and items with stored embeddings) to enable hybrid
+ * vector + keyword retrieval. Defaults preserve the legacy keyword-only
+ * scoring exactly.
+ */
+export interface RetrievalConfig {
+    alpha?: number;
+    beta?: number;
+    gamma?: number;
+    delta?: number;
+    /** When true, override `delta` to 0.40 if a provider is registered. */
+    autoEnableEmbeddings?: boolean;
 }
 
 export async function retrieve(
     query: string,
     k: number = 5,
-    alpha: number = ALPHA_RECENCY,
-    beta: number = BETA_IMPORTANCE,
-    gamma: number = GAMMA_RELEVANCE,
+    configOrAlpha: RetrievalConfig | number = {},
+    legacyBeta?: number,
+    legacyGamma?: number,
 ): Promise<[string, number, Record<string, any>][]> {
     if (!MEMORY_ENABLED) return [];
+
+    // Backwards-compat shim: callers used to pass (query, k, alpha, beta, gamma).
+    let cfg: RetrievalConfig;
+    if (typeof configOrAlpha === 'number') {
+        cfg = {
+            alpha: configOrAlpha,
+            beta: legacyBeta ?? BETA_IMPORTANCE,
+            gamma: legacyGamma ?? GAMMA_RELEVANCE,
+        };
+    } else {
+        cfg = configOrAlpha;
+    }
+
+    const alpha = cfg.alpha ?? ALPHA_RECENCY;
+    const beta = cfg.beta ?? BETA_IMPORTANCE;
+    const gamma = cfg.gamma ?? GAMMA_RELEVANCE;
+    let delta = cfg.delta ?? DELTA_EMBEDDING;
+    if (cfg.autoEnableEmbeddings && _embeddingProvider) delta = Math.max(delta, 0.40);
+
     const items = await loadMemories();
     if (!items.length) return [];
+
+    // Query embedding, only if vector weight matters and we have a provider.
+    let queryEmbedding: number[] | null = null;
+    if (delta > 0 && _embeddingProvider) {
+        try {
+            const out = await _embeddingProvider.embed([query]);
+            queryEmbedding = out[0] ?? null;
+        } catch {
+            queryEmbedding = null;
+        }
+    }
+
     const now = Date.now() / 1000;
     const scored: [number, Record<string, any>][] = [];
     for (const m of items) {
         const rec = recencyScore(m.created_at, now);
         const imp = m.importance ?? 0.5;
         const rel = relevanceScore(query, m.content ?? '');
-        const score = alpha * rec + beta * imp + gamma * rel;
+        let emb = 0;
+        if (queryEmbedding && Array.isArray(m.embedding) && m.embedding.length === queryEmbedding.length) {
+            emb = cosineSimilarity(queryEmbedding, m.embedding);
+        }
+        const score = alpha * rec + beta * imp + gamma * rel + delta * emb;
         scored.push([score, m]);
     }
     scored.sort((a, b) => b[0] - a[0]);

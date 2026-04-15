@@ -21,7 +21,7 @@ import { LLMProvider, LLMResponse, ToolCall } from './llmProtocol';
 import { SessionManager, Session } from './sessionCore';
 import { LifecycleManager, getBudget, selectHistory, assembleSystem, sanitizeUserInput, foldObservation, contextEnabled as envContextEnabled } from './contextCore';
 import { ContextBuilder } from './contextBuilder';
-import { retrieve, consolidateTurn, writeInsight, setMemoryStore, MEMORY_ENABLED } from './memoryCore';
+import { retrieve, consolidateTurn, writeInsight, setMemoryStore, setEmbeddingProvider, MEMORY_ENABLED } from './memoryCore';
 import { createFileBackend } from './storage/fileBackend';
 import { StorageBackend } from './storage/protocols';
 import { toTokenUsage, mergeTokenUsage, estimateCost, type TokenUsage } from './pricing';
@@ -324,6 +324,9 @@ export class AgentInstance {
         });
         if (storage?.memoryStore && this._memoryEnabled) {
             setMemoryStore(storage.memoryStore);
+        }
+        if (config.embeddingProvider && this._memoryEnabled) {
+            setEmbeddingProvider(config.embeddingProvider);
         }
         this._storageInitialized = config.storage?.backend !== 'cloud';
     }
