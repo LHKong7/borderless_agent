@@ -176,6 +176,8 @@ export interface AgentConfig {
     enableContext?: boolean;
     /** Max tool rounds per turn. Default: 20. */
     maxToolRounds?: number;
+    /** Max output tokens per LLM call. Default: 8000. */
+    maxTokens?: number;
     /** Callback for executor approval. Return true to approve. */
     approvalCallback?: (toolName: string, args: Record<string, any>) => Promise<boolean> | boolean;
     /**

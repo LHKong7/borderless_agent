@@ -66,15 +66,22 @@ export function getContextWindowForModel(model: string, defaultSize: number = 12
 // ---------------------------------------------------------------------------
 
 export interface RetryOptions {
+    /**
+     * Total number of attempts (initial + retries). Default 3.
+     * `maxAttempts` is an alias; if both are provided, `maxAttempts` wins.
+     * Note: historically named `maxRetries`, but it has always counted total
+     * attempts. The name is preserved for backward compatibility.
+     */
     maxRetries?: number;
+    maxAttempts?: number;
     baseDelayMs?: number;
     retryableStatuses?: number[];
 }
 
-const DEFAULT_RETRY_OPTIONS: Required<RetryOptions> = {
-    maxRetries: 3,
+const DEFAULT_RETRY_OPTIONS = {
+    maxAttempts: 3,
     baseDelayMs: 1000,
-    retryableStatuses: [429, 500, 502, 503],
+    retryableStatuses: [429, 500, 502, 503] as number[],
 };
 
 /**
@@ -85,12 +92,11 @@ export async function withRetry<T>(
     fn: () => Promise<T>,
     opts?: RetryOptions,
 ): Promise<T> {
-    const { maxRetries, baseDelayMs, retryableStatuses } = {
-        ...DEFAULT_RETRY_OPTIONS,
-        ...opts,
-    };
+    const baseDelayMs = opts?.baseDelayMs ?? DEFAULT_RETRY_OPTIONS.baseDelayMs;
+    const retryableStatuses = opts?.retryableStatuses ?? DEFAULT_RETRY_OPTIONS.retryableStatuses;
+    const maxAttempts = opts?.maxAttempts ?? opts?.maxRetries ?? DEFAULT_RETRY_OPTIONS.maxAttempts;
 
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
             return await fn();
         } catch (e: any) {
@@ -102,7 +108,8 @@ export async function withRetry<T>(
             }
 
             const retryable = retryableStatuses.includes(status);
-            if (attempt < maxRetries && retryable) {
+            const hasMore = attempt < maxAttempts;
+            if (hasMore && retryable) {
                 const delay = baseDelayMs * Math.pow(2, attempt - 1);
                 if (status === 429) {
                     const retryAfter = parseFloat(e?.headers?.['retry-after'] ?? '0') * 1000 || delay;
@@ -118,12 +125,13 @@ export async function withRetry<T>(
             }
 
             if (retryable) {
-                throw new LLMError(`LLM call failed after ${maxRetries} retries: ${e.message ?? e}`, 'LLM_RETRY_EXHAUSTED');
+                throw new LLMError(`LLM call failed after ${maxAttempts} attempts: ${e.message ?? e}`, 'LLM_RETRY_EXHAUSTED');
             }
 
             throw e;
         }
     }
+    // Unreachable: loop body either returns or throws.
     throw new LLMError('LLM call failed after retries', 'LLM_RETRY_EXHAUSTED');
 }
 

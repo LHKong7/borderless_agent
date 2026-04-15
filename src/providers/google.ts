@@ -102,6 +102,20 @@ function toolsToGeminiFormat(tools: any[]): any[] {
     return [{ functionDeclarations: declarations }];
 }
 
+function shortHash(s: string): string {
+    let h = 0;
+    for (let i = 0; i < s.length; i++) {
+        h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+    }
+    return Math.abs(h).toString(36).slice(0, 8);
+}
+
+function geminiToolCallId(name: string, index: number, args: any): string {
+    let argStr = '';
+    try { argStr = JSON.stringify(args ?? {}); } catch { argStr = String(args); }
+    return `gemini_${name}_${index}_${shortHash(argStr)}`;
+}
+
 function parseGeminiResponse(response: any): {
     text: string;
     toolCalls: ToolCall[];
@@ -112,13 +126,16 @@ function parseGeminiResponse(response: any): {
     const textParts: string[] = [];
     const toolCalls: ToolCall[] = [];
 
+    let tcIdx = 0;
     for (const part of parts) {
         if (part.text) textParts.push(part.text);
         if (part.functionCall) {
+            const name = part.functionCall.name ?? '';
+            const args = part.functionCall.args ?? {};
             toolCalls.push({
-                id: `gemini_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-                name: part.functionCall.name ?? '',
-                arguments: part.functionCall.args ?? {},
+                id: geminiToolCallId(name, tcIdx++, args),
+                name,
+                arguments: args,
             });
         }
     }
@@ -159,10 +176,14 @@ export class GoogleProvider implements LLMProvider {
         if (this._client) return this._client;
         const sdk = await getGoogleSDK();
         const GoogleGenerativeAI = sdk.GoogleGenerativeAI;
-        const opts: any = { apiKey: this._apiKey };
-        if (this._baseUrl) opts.baseUrl = this._baseUrl;
         this._client = new GoogleGenerativeAI(this._apiKey);
         return this._client;
+    }
+
+    /** Apply baseUrl to per-call requestOptions when configured. */
+    private _withBaseUrl<T extends Record<string, any>>(opts: T): T {
+        if (!this._baseUrl) return opts;
+        return { ...opts, requestOptions: { ...(opts.requestOptions ?? {}), baseUrl: this._baseUrl } };
     }
 
     get contextWindowSize(): number {
@@ -205,7 +226,7 @@ export class GoogleProvider implements LLMProvider {
         if (Object.keys(generationConfig).length) modelOpts.generationConfig = generationConfig;
 
         return withRetry(async () => {
-            const model = client.getGenerativeModel(modelOpts);
+            const model = client.getGenerativeModel(this._withBaseUrl(modelOpts));
             const result = await model.generateContent({ contents });
             const response = result.response;
             const parsed = parseGeminiResponse(response);
@@ -235,7 +256,7 @@ export class GoogleProvider implements LLMProvider {
         if (tools) modelOpts.tools = tools;
         if (Object.keys(generationConfig).length) modelOpts.generationConfig = generationConfig;
 
-        const model = client.getGenerativeModel(modelOpts);
+        const model = client.getGenerativeModel(this._withBaseUrl(modelOpts));
         const streamResult: any = await withRetry(() =>
             model.generateContentStream({ contents }),
         );
@@ -243,6 +264,7 @@ export class GoogleProvider implements LLMProvider {
         const contentParts: string[] = [];
         const toolCalls: ToolCall[] = [];
         let usage: Record<string, number> = {};
+        let tcIdx = 0;
 
         for await (const chunk of streamResult.stream) {
             const candidate = chunk.candidates?.[0];
@@ -252,10 +274,12 @@ export class GoogleProvider implements LLMProvider {
                     yield { content: part.text, toolCalls: [], usage: {}, model: this._model };
                 }
                 if (part.functionCall) {
+                    const name = part.functionCall.name ?? '';
+                    const args = part.functionCall.args ?? {};
                     toolCalls.push({
-                        id: `gemini_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-                        name: part.functionCall.name ?? '',
-                        arguments: part.functionCall.args ?? {},
+                        id: geminiToolCallId(name, tcIdx++, args),
+                        name,
+                        arguments: args,
                     });
                 }
             }

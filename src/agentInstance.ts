@@ -285,6 +285,8 @@ export class AgentInstance {
     private _toolMap: Map<string, ToolDefinition>;
     private _sessionMgr: SessionManager;
     private _maxToolRounds: number;
+    private _maxTokens: number;
+    private _mcpToolNames: Set<string> = new Set();
     private _memoryEnabled: boolean;
     private _streamingEnabled: boolean;
     private _contextEnabled: boolean;
@@ -312,6 +314,7 @@ export class AgentInstance {
     constructor(config: AgentConfig) {
         this._llm = config.llm!;
         this._maxToolRounds = config.maxToolRounds ?? 20;
+        this._maxTokens = config.maxTokens ?? 8000;
         this._memoryEnabled = config.enableMemory ?? false;
         this._guards = config.guards ?? GuardPipeline.defaults();
         this._streamingEnabled = config.enableStreaming ?? false;
@@ -431,20 +434,27 @@ export class AgentInstance {
      */
     async initMCP(): Promise<void> {
         if (!this._harness.mcpConfigs.length) return;
-        const wasConnected = this._harness.mcpManager !== null;
         await this._harness.initMCP();
         const mgr = this._harness.mcpManager;
-        if (mgr && !wasConnected) {
-            for (const mcpTool of mgr.getToolDefinitions()) {
-                this._openaiTools.push({
-                    type: 'function',
-                    function: {
-                        name: mcpTool.name,
-                        description: mcpTool.description,
-                        parameters: mcpTool.input_schema,
-                    },
-                });
-            }
+        if (!mgr) return;
+
+        // Drop any previously-registered MCP tools so reconnects don't duplicate.
+        if (this._mcpToolNames.size) {
+            this._openaiTools = this._openaiTools.filter(
+                (t) => !this._mcpToolNames.has(t?.function?.name),
+            );
+            this._mcpToolNames.clear();
+        }
+        for (const mcpTool of mgr.getToolDefinitions()) {
+            this._openaiTools.push({
+                type: 'function',
+                function: {
+                    name: mcpTool.name,
+                    description: mcpTool.description,
+                    parameters: mcpTool.input_schema,
+                },
+            });
+            this._mcpToolNames.add(mcpTool.name);
         }
     }
 
@@ -769,8 +779,6 @@ export class AgentInstance {
             } catch (e: any) {
                 const errMsg = `I encountered an error communicating with the AI model: ${e.message ?? String(e)}. Please try again.`;
                 workingHistory.push({ role: 'assistant', content: errMsg });
-                history.length = 0;
-                history.push(...workingHistory);
                 return { reply: errMsg, history: workingHistory, hadToolCalls, usage: accumulatedUsage };
             }
 
@@ -799,8 +807,6 @@ export class AgentInstance {
                     }
                     finally { cspan.end(); }
                 }
-                history.length = 0;
-                history.push(...workingHistory);
                 const model = response.model ?? '';
                 return {
                     reply: content.trim(),
@@ -817,8 +823,6 @@ export class AgentInstance {
                 const msg =
                     'Stopped: reached tool-use safety limit. Please simplify your request.';
                 workingHistory.push({ role: 'assistant', content: msg });
-                history.length = 0;
-                history.push(...workingHistory);
                 return { reply: msg, history: workingHistory, hadToolCalls, usage: accumulatedUsage };
             }
 
@@ -888,6 +892,8 @@ export class AgentInstance {
 
         let toolRounds = 0;
         let hadToolCalls = false;
+        let accumulatedUsage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+        let lastModel = '';
 
         while (true) {
             let streamGen: AsyncGenerator<LLMResponse>;
@@ -896,30 +902,52 @@ export class AgentInstance {
             } catch (e: any) {
                 const errMsg = `I encountered an error communicating with the AI model: ${e.message ?? String(e)}. Please try again.`;
                 workingHistory.push({ role: 'assistant', content: errMsg });
-                history.length = 0;
-                history.push(...workingHistory);
-                if (onComplete) onComplete({ reply: errMsg, history: workingHistory, hadToolCalls });
-                yield { reply: errMsg, done: true };
+                const errResult: ChatResult = { reply: errMsg, history: workingHistory, hadToolCalls, usage: accumulatedUsage };
+                if (onComplete) onComplete(errResult);
+                yield { reply: errMsg, done: true, usage: accumulatedUsage };
                 return;
             }
 
             let lastResponse: LLMResponse | null = null;
+            let prevContentLen = 0;
             try {
+                // eslint-disable-next-line no-inner-declarations
                 for await (const r of streamGen) {
-                    if (r.content && !r.toolCalls?.length) {
-                        yield { delta: r.content, done: false };
+                    // Forward incremental text deltas regardless of whether the
+                    // round will end in tool_use. Anthropic interleaves text
+                    // *then* tool_use; the final yield carries `toolCalls` plus
+                    // the cumulative content — suppressing on toolCalls drops
+                    // any preceding text from the user-facing stream.
+                    if (r.content) {
+                        const cur = r.content;
+                        let delta: string;
+                        if (cur.length > prevContentLen && cur.startsWith(cur.slice(0, prevContentLen))) {
+                            // Cumulative content (final yield from some providers).
+                            delta = cur.slice(prevContentLen);
+                            prevContentLen = cur.length;
+                        } else {
+                            // Incremental delta (per-chunk yields).
+                            delta = cur;
+                            prevContentLen += cur.length;
+                        }
+                        if (delta) yield { delta, done: false };
                     }
                     lastResponse = r;
                 }
             } catch (e: any) {
                 const errMsg = `Stream interrupted: ${e.message ?? String(e)}`;
                 workingHistory.push({ role: 'assistant', content: errMsg });
-                history.length = 0;
-                history.push(...workingHistory);
-                if (onComplete) onComplete({ reply: errMsg, history: workingHistory, hadToolCalls });
-                yield { reply: errMsg, done: true };
+                const errResult: ChatResult = { reply: errMsg, history: workingHistory, hadToolCalls, usage: accumulatedUsage };
+                if (onComplete) onComplete(errResult);
+                yield { reply: errMsg, done: true, usage: accumulatedUsage };
                 return;
             }
+
+            // Accumulate usage from final chunk.
+            if (lastResponse?.usage && Object.keys(lastResponse.usage).length > 0) {
+                accumulatedUsage = mergeTokenUsage(accumulatedUsage, toTokenUsage(lastResponse.usage));
+            }
+            if (lastResponse?.model) lastModel = lastResponse.model;
 
             const content = lastResponse?.content ?? '';
             const thinking = lastResponse?.thinking ?? null;
@@ -940,15 +968,16 @@ export class AgentInstance {
                     }
                     finally { cspan.end(); }
                 }
-                history.length = 0;
-                history.push(...workingHistory);
+                const estimatedCost = estimateCost(accumulatedUsage, lastModel);
                 const result: ChatResult = {
                     reply: content.trim(),
                     history: workingHistory,
                     hadToolCalls,
+                    usage: accumulatedUsage,
+                    estimatedCost,
                 };
                 if (onComplete) onComplete(result);
-                yield { reply: content.trim(), done: true };
+                yield { reply: content.trim(), done: true, usage: accumulatedUsage, estimatedCost };
                 return;
             }
 
@@ -957,14 +986,12 @@ export class AgentInstance {
             if (toolRounds >= this._maxToolRounds) {
                 const msg = 'Stopped: reached tool-use safety limit.';
                 workingHistory.push({ role: 'assistant', content: msg });
-                history.length = 0;
-                history.push(...workingHistory);
-                if (onComplete) {
-                    onComplete({ reply: msg, history: workingHistory, hadToolCalls });
-                }
-                yield { reply: msg, done: true };
+                const result: ChatResult = { reply: msg, history: workingHistory, hadToolCalls, usage: accumulatedUsage };
+                if (onComplete) onComplete(result);
+                yield { reply: msg, done: true, usage: accumulatedUsage };
                 return;
             }
+            // (Next round resets its own prevContentLen via the let above.)
 
             // Execute tools (non-streaming phase, parallel-safe ones in parallel)
             const results = await this._executeToolBatch(tcs);
@@ -1018,7 +1045,7 @@ export class AgentInstance {
             try {
                 const result = this._llm.chat(apiMessages, {
                     tools: this._openaiTools,
-                    maxTokens: 8000,
+                    maxTokens: this._maxTokens,
                     stream,
                 });
                 // For non-streaming we can record usage once the promise settles.

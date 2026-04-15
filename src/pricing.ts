@@ -77,10 +77,11 @@ export function getModelPricing(model: string): ModelPricing | null {
     // Exact match first
     if (merged[lower]) return merged[lower];
 
-    // Prefix match (longest first)
+    // Prefix match (longest first). Substring-only collisions caused
+    // mismatches like `gpt-4` swallowing `gpt-4o-mini`; require startsWith.
     let bestMatch: string | null = null;
     for (const key of Object.keys(merged)) {
-        if (lower.startsWith(key) || lower.includes(key)) {
+        if (lower.startsWith(key)) {
             if (!bestMatch || key.length > bestMatch.length) {
                 bestMatch = key;
             }
