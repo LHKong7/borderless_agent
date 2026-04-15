@@ -60,6 +60,18 @@ export interface ToolDefinition {
      * 'safe' = read-only, 'moderate' = file mods, 'dangerous' = execution, 'critical' = unrestricted.
      */
     permissionLevel?: 'safe' | 'moderate' | 'dangerous' | 'critical';
+    /**
+     * Per-tool execution timeout in ms. Falls back to the executor default
+     * (60s) when omitted. Capped at 10 minutes by the executor.
+     */
+    timeout?: number;
+    /**
+     * Whether this tool can be safely executed in parallel with sibling
+     * tool calls in the same round. Defaults to `true`. Set to `false`
+     * for tools with shared mutable state (e.g. an interactive REPL).
+     * Tools with `requiresApproval: true` are always serialized regardless.
+     */
+    concurrencySafe?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -83,6 +95,34 @@ export interface SkillDefinition {
     description: string;
     /** Markdown body injected into context when the skill is loaded. */
     body: string;
+    // ---- Optional metadata (PR6) -----------------------------------------
+    /** Semantic version. Default: '1.0.0'. */
+    version?: string;
+    /** Free-form tags. Used by SkillRegistry.search and listByTag. */
+    tags?: string[];
+    /** Logical categories. Used by SkillRegistry.listByCategory. */
+    categories?: string[];
+    /** Names of skills this skill depends on. Auto-loaded transitively. */
+    dependencies?: string[];
+    /**
+     * Auto-trigger pattern. When the user input matches the string
+     * (substring) or RegExp, SkillLifecycleManager.matchTriggers will
+     * surface this skill so the loop can auto-load it.
+     */
+    trigger?: string | RegExp;
+    /** Few-shot examples shown alongside the description when relevant. */
+    examples?: { description?: string; input: string; output: string }[];
+    /** Hook fired when the skill is first loaded into a session. */
+    onLoad?: (ctx: SkillContext) => Promise<void> | void;
+    /** Hook fired when the skill is unloaded. */
+    onUnload?: (ctx: SkillContext) => Promise<void> | void;
+}
+
+/** Context passed to skill lifecycle hooks. */
+export interface SkillContext {
+    sessionId?: string;
+    /** Free-form scratch area shared between onLoad / onUnload calls. */
+    scratch: Record<string, any>;
 }
 
 // ---------------------------------------------------------------------------
@@ -153,6 +193,20 @@ export interface AgentConfig {
      * When not set, memory retrieval uses keyword-based scoring only.
      */
     embeddingProvider?: EmbeddingProvider;
+    /**
+     * Optional telemetry instance. If omitted, a no-op telemetry is used
+     * (zero overhead). Construct with `new Telemetry({ exporter: ... })`
+     * and pass in to enable spans, logs, and GenAI semantic attributes.
+     */
+    telemetry?: import('./telemetry').Telemetry;
+    /**
+     * Optional guard pipeline. When omitted a default pipeline is built
+     * with built-in injection-detection + credential-redaction guards.
+     * Pass `new GuardPipeline({ input: [...], observation: [...] })` to
+     * customise — for example to add a regulator-specific PII pattern or
+     * a content-moderation upstream call.
+     */
+    guards?: import('./guardrails').GuardPipeline;
 }
 
 // ---------------------------------------------------------------------------

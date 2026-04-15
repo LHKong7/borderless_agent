@@ -46,6 +46,14 @@ export { getContextWindowForModel, withRetry } from './providers/base';
 // ---- Embeddings (optional) ----
 export { OpenAIEmbeddingProvider, cosineSimilarity } from './providers/embeddings';
 export type { EmbeddingProvider } from './providers/embeddings';
+export {
+    setEmbeddingProvider,
+    getEmbeddingProvider,
+    retrieve as retrieveMemories,
+    writeEvent as writeMemoryEvent,
+    writeInsight as writeMemoryInsight,
+} from './memoryCore';
+export type { RetrievalConfig } from './memoryCore';
 
 // ---- Pricing & Token Usage ----
 export {
@@ -70,6 +78,63 @@ export type { MCPServerConfig } from './mcpClient';
 
 // ---- Session manager (for direct access) ----
 export { SessionManager, Session } from './sessionCore';
+
+// ---- Telemetry & metrics ----
+export { Telemetry, ConsoleExporter, MemoryExporter } from './telemetry';
+export type {
+    Span,
+    SpanData,
+    SpanStatus,
+    LogEntry,
+    LogLevel,
+    TelemetryExporter,
+    TelemetryConfig,
+} from './telemetry';
+export { MetricsCollector } from './metrics';
+export type {
+    TurnMetrics,
+    ToolMetrics,
+    AgentMetricsSnapshot,
+} from './metrics';
+
+// ---- Context assembly ----
+export { ContextBuilder, SourceRegistry } from './contextBuilder';
+export type {
+    ContextSource,
+    SourceCategory,
+    AssembleResult,
+    ContextBuilderOptions,
+    BuildContextResult,
+} from './contextBuilder';
+
+// ---- Composition root ----
+export { AgentHarness, ToolRegistry } from './harness';
+export type { HarnessConfig } from './harness';
+
+// ---- Guardrails ----
+export {
+    GuardPipeline,
+    injectionDetectionGuard,
+    piiRedactionGuard,
+    DEFAULT_PII_PATTERNS,
+} from './guardrails';
+export type { Guard, GuardContext, GuardResult, GuardOutcome, GuardPipelineOptions } from './guardrails';
+
+// ---- Skills (registry + lifecycle) ----
+export { SkillRegistry } from './skillRegistry';
+export { SkillLifecycleManager } from './skillLifecycle';
+export type { SkillContext } from './types';
+export type { SkillLoadResult, SkillLifecycleManagerOptions } from './skillLifecycle';
+
+// ---- Tool execution ----
+export { ToolExecutor } from './toolExecutor';
+export type {
+    ToolCallRequest,
+    ToolCallResult,
+    ExecutionPlan,
+    ToolExecutorContext,
+    ToolExecutorOptions,
+} from './toolExecutor';
 
 // ---- Errors ----
 export {
