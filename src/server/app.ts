@@ -33,8 +33,8 @@ let sessionMgr: SessionManager | null = null;
  */
 let _currentSessionId = '';
 
-function getSessionMgr(): SessionManager {
-    if (!sessionMgr) initServer();
+async function getSessionMgr(): Promise<SessionManager> {
+    if (!sessionMgr) await initServer();
     return sessionMgr!;
 }
 
@@ -59,10 +59,10 @@ async function serverHumanInputCallback(question: string): Promise<string> {
     return humanLoopManager.ask(sid, question);
 }
 
-function initServer(): void {
+async function initServer(): Promise<void> {
     if (sessionMgr) return;
     setupAgentLogging();
-    const backend = getStorageBackend();
+    const backend = await getStorageBackend();
     sessionMgr = new SessionManager({ store: backend.sessionStore });
     setMemoryStore(backend.memoryStore);
     SKILLS.setStore(backend.skillStore);
@@ -110,14 +110,14 @@ const SSE_TIMEOUT_MS = 5 * 60 * 1000;
 
 // POST /sessions — create new session
 app.post('/sessions', async (_req: Request, res: Response) => {
-    const mgr = getSessionMgr();
+    const mgr = await getSessionMgr();
     const session = await mgr.createSession({ context: { started: true } });
     res.status(201).json({ session_id: session.id });
 });
 
 // GET /sessions — list sessions
 app.get('/sessions', async (req: Request, res: Response) => {
-    const mgr = getSessionMgr();
+    const mgr = await getSessionMgr();
     const limit = Math.min(
         Math.max(parseInt(String(req.query.limit ?? '20'), 10) || 20, 1),
         100,
@@ -128,7 +128,7 @@ app.get('/sessions', async (req: Request, res: Response) => {
 
 // GET /sessions/:id — get session info
 app.get('/sessions/:sessionId', async (req: Request, res: Response) => {
-    const mgr = getSessionMgr();
+    const mgr = await getSessionMgr();
     const session = await mgr.restoreSession(req.params.sessionId);
     if (!session) {
         res.status(404).json({ detail: 'Session not found' });
@@ -147,7 +147,7 @@ app.get('/sessions/:sessionId', async (req: Request, res: Response) => {
 // Note: ask_user is NOT supported in sync mode (no way to deliver question to client mid-request).
 // The agent will get a "not available" response and proceed with best judgment.
 app.post('/sessions/:sessionId/turn', async (req: Request, res: Response) => {
-    const mgr = getSessionMgr();
+    const mgr = await getSessionMgr();
     const createIfMissing = req.query.create_if_missing === 'true';
     let session = await mgr.restoreSession(req.params.sessionId);
     let created = false;
@@ -206,7 +206,7 @@ app.post('/sessions/:sessionId/turn', async (req: Request, res: Response) => {
 app.post(
     '/sessions/:sessionId/turn/stream',
     async (req: Request, res: Response) => {
-        const mgr = getSessionMgr();
+        const mgr = await getSessionMgr();
         const createIfMissing = req.query.create_if_missing === 'true';
         let session = await mgr.restoreSession(req.params.sessionId);
 
@@ -326,8 +326,9 @@ export { app };
 // Start server if run directly
 if (require.main === module) {
     const port = parseInt(process.env.PORT ?? '8000', 10);
-    initServer();
-    app.listen(port, () => {
-        logger.info(`Agent API server listening on port ${port}`);
+    initServer().then(() => {
+        app.listen(port, () => {
+            logger.info(`Agent API server listening on port ${port}`);
+        });
     });
 }

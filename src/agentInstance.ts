@@ -20,11 +20,20 @@ import { AutonomousLoop } from './autonomousLoop';
 import { LLMProvider, LLMResponse, ToolCall } from './llmProtocol';
 import { SessionManager, Session } from './sessionCore';
 import { LifecycleManager, getBudget, selectHistory, assembleSystem, sanitizeUserInput, foldObservation, contextEnabled as envContextEnabled } from './contextCore';
-import { retrieve, consolidateTurn, writeInsight, setMemoryStore, MEMORY_ENABLED } from './memoryCore';
+import { ContextBuilder } from './contextBuilder';
+import { retrieve, consolidateTurn, writeInsight, setMemoryStore, setEmbeddingProvider, MEMORY_ENABLED } from './memoryCore';
 import { createFileBackend } from './storage/fileBackend';
 import { StorageBackend } from './storage/protocols';
+import { toTokenUsage, mergeTokenUsage, estimateCost, type TokenUsage } from './pricing';
 import { Sandbox } from './sandbox';
 import { MCPManager, MCPServerConfig } from './mcpClient';
+import { ToolExecutor, ToolCallRequest } from './toolExecutor';
+import { Telemetry } from './telemetry';
+import { MetricsCollector } from './metrics';
+import { AgentHarness } from './harness';
+import { SkillRegistry } from './skillRegistry';
+import { SkillLifecycleManager } from './skillLifecycle';
+import { GuardPipeline } from './guardrails';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -57,28 +66,70 @@ function skillDescriptions(skills: SkillDefinition[]): string {
     );
 }
 
-/** Build the Skill meta-tool for user-defined skills */
-function buildSkillTool(skills: SkillDefinition[]): ToolDefinition | null {
-    if (!skills.length) return null;
-    const loadedSkills = new Set<string>();
+/** Build the Skill meta-tool backed by a SkillLifecycleManager */
+function buildSkillTool(manager: SkillLifecycleManager): ToolDefinition | null {
+    if (!manager.registry.list().length) return null;
+    const describeAvailable = () =>
+        manager.registry.list().map((s) => `- ${s.name}: ${s.description}`).join('\n');
     return {
         name: 'Skill',
         description:
-            'Load a skill for specialized knowledge.\nAvailable:\n' +
-            skills.map((s) => `- ${s.name}: ${s.description}`).join('\n'),
-        parameters: { skill: { type: 'string', description: 'Skill name to load' } },
+            'Load / unload / inspect skills for specialised knowledge.\n' +
+            'Actions: load (default) | unload | list | search | info\n\n' +
+            'Available:\n' + describeAvailable(),
+        parameters: {
+            skill: { type: 'string', description: 'Skill name (or search query for action=search)' },
+            action: {
+                type: 'string',
+                description: 'load | unload | list | search | info (default: load)',
+                enum: ['load', 'unload', 'list', 'search', 'info'],
+            },
+        },
         required: ['skill'],
-        execute: (args) => {
-            const name = args.skill;
-            if (loadedSkills.has(name)) {
-                return `(Skill '${name}' already loaded. Use the knowledge above.)`;
+        execute: async (args) => {
+            const action = (args.action ?? 'load') as string;
+            const name = args.skill ?? '';
+            switch (action) {
+                case 'list': {
+                    const all = manager.registry.list();
+                    if (!all.length) return '(no skills available)';
+                    return all.map((s) => `- ${s.name}: ${s.description}`).join('\n');
+                }
+                case 'search': {
+                    const hits = manager.registry.search(name);
+                    if (!hits.length) return `No skills matching '${name}'.`;
+                    return hits.map((s) => `- ${s.name}: ${s.description}`).join('\n');
+                }
+                case 'info': {
+                    const s = manager.registry.get(name);
+                    if (!s) return `Skill '${name}' not found.`;
+                    return [
+                        `## ${s.name} (v${s.version ?? '1.0.0'})`,
+                        s.description,
+                        s.tags?.length ? `Tags: ${s.tags.join(', ')}` : '',
+                        s.categories?.length ? `Categories: ${s.categories.join(', ')}` : '',
+                        s.dependencies?.length ? `Dependencies: ${s.dependencies.join(', ')}` : '',
+                    ].filter(Boolean).join('\n');
+                }
+                case 'unload': {
+                    await manager.unloadSkill(name);
+                    return `Unloaded skill '${name}'.`;
+                }
+                case 'load':
+                default: {
+                    if (manager.isLoaded(name)) {
+                        return `(Skill '${name}' already loaded. Use the knowledge in context.)`;
+                    }
+                    const r = await manager.loadSkill(name);
+                    if (!r.success) {
+                        return `Failed to load '${name}': ${r.error ?? 'unknown error'}. Available: ${manager.registry.list().map((s) => s.name).join(', ')}`;
+                    }
+                    const extras = r.loadedDependencies.length
+                        ? ` (also loaded dependencies: ${r.loadedDependencies.join(', ')})`
+                        : '';
+                    return `Loaded skill '${name}'${extras}. Knowledge is now active in context — do NOT call Skill again for this skill.`;
+                }
             }
-            const skill = skills.find((s) => s.name === name);
-            if (!skill) {
-                return `Error: Unknown skill '${name}'. Available: ${skills.map((s) => s.name).join(', ')}`;
-            }
-            loadedSkills.add(name);
-            return `<skill-loaded name="${name}">\n# Skill: ${skill.name}\n\n${skill.body}\n</skill-loaded>\n\nUse the knowledge above to complete the user's task. Do NOT call Skill again.`;
         },
     };
 }
@@ -242,17 +293,27 @@ export class AgentInstance {
         args: Record<string, any>,
     ) => Promise<boolean> | boolean;
     private _humanInputCallback?: (question: string) => Promise<string> | string;
-    private _sandbox: Sandbox;
-    private _mcpManager: MCPManager | null = null;
-    private _mcpConfigs: MCPServerConfig[];
-    private _mcpInitialized: boolean = false;
-    private _mcpInitPromise: Promise<void> | null = null;
+    private _harness!: AgentHarness;
+    private _skillRegistry!: SkillRegistry;
+    private _skillManager!: SkillLifecycleManager;
+    private _guards!: GuardPipeline;
+
+    // Convenience accessors that delegate to the harness. Kept private so
+    // callers either go through the public API or grab the harness directly.
+    private get _sandbox(): Sandbox { return this._harness.sandbox; }
+    private get _telemetry(): Telemetry { return this._harness.telemetry; }
+    private get _metrics(): MetricsCollector { return this._harness.metrics; }
+    private get _toolExecutor(): ToolExecutor { return this._harness.toolExecutor; }
+    private get _mcpManager(): MCPManager | null { return this._harness.mcpManager; }
+    private _storageInitialized: boolean = false;
+    private _storageInitPromise: Promise<void> | null = null;
+    private _storageConfig?: AgentConfig['storage'];
 
     constructor(config: AgentConfig) {
         this._llm = config.llm!;
         this._maxToolRounds = config.maxToolRounds ?? 20;
-        this._sandbox = new Sandbox(config.sandbox);
         this._memoryEnabled = config.enableMemory ?? false;
+        this._guards = config.guards ?? GuardPipeline.defaults();
         this._streamingEnabled = config.enableStreaming ?? false;
         this._contextEnabled = config.enableContext ?? true;
         this._approvalCallback = config.approvalCallback;
@@ -267,16 +328,37 @@ export class AgentInstance {
             this._tools.push(...config.tools);
         }
 
-        // Skills
+        // Skills — registry + lifecycle manager
         this._skills = config.skills ?? [];
-        const skillTool = buildSkillTool(this._skills);
-        if (skillTool) this._tools.push(skillTool);
+        this._skillRegistry = new SkillRegistry(this._skills);
 
         // Human-in-the-loop tool
         this._tools.push(this._buildAskUserTool());
 
-        // Build lookup and OpenAI format
-        this._toolMap = new Map(this._tools.map((t) => [t.name, t]));
+        // Build the harness (composition root for sandbox / executor / telemetry / metrics / mcp).
+        this._harness = new AgentHarness({
+            llm: this._llm,
+            tools: this._tools,
+            sandbox: config.sandbox,
+            telemetry: config.telemetry,
+            mcpServers: config.mcpServers ?? [],
+        });
+
+        // Lifecycle manager needs telemetry from the harness; build it after.
+        this._skillManager = new SkillLifecycleManager({
+            registry: this._skillRegistry,
+            telemetry: this._harness.telemetry,
+        });
+
+        // The Skill meta-tool is now backed by the lifecycle manager.
+        const skillTool = buildSkillTool(this._skillManager);
+        if (skillTool) {
+            this._tools.push(skillTool);
+            this._harness.toolRegistry.register(skillTool);
+        }
+
+        // Tool lookup and OpenAI format (mirror the harness registry for the LLM payload).
+        this._toolMap = this._harness.toolRegistry.asMap();
         this._openaiTools = toolDefsToOpenAI(this._tools);
 
         // System prompt
@@ -287,19 +369,16 @@ export class AgentInstance {
             this._systemPrompt += skillDescriptions(this._skills);
         }
 
-        // Storage & session manager
+        // Storage & session manager (cloud backend init is deferred since it's async)
+        this._storageConfig = config.storage;
         let storage: StorageBackend | undefined;
         if (config.storage) {
             if (config.storage.custom) {
-                // User-provided StorageBackend (e.g. @vercel/storage, Supabase)
                 storage = config.storage.custom;
-            } else if (config.storage.backend === 'cloud') {
-                // S3-compatible cloud backend (dynamic import to avoid requiring @aws-sdk when unused)
-                const { createCloudBackend } = require('./storage/cloudBackend');
-                storage = createCloudBackend();
             } else if (config.storage.backend === 'file') {
                 storage = createFileBackend({ sessionDir: config.storage.dir });
             }
+            // cloud backend is initialized lazily via initStorage()
         }
         this._sessionMgr = new SessionManager({
             store: storage?.sessionStore ?? undefined,
@@ -307,44 +386,66 @@ export class AgentInstance {
         if (storage?.memoryStore && this._memoryEnabled) {
             setMemoryStore(storage.memoryStore);
         }
+        if (config.embeddingProvider && this._memoryEnabled) {
+            setEmbeddingProvider(config.embeddingProvider);
+        }
+        this._storageInitialized = config.storage?.backend !== 'cloud';
+    }
 
-        // MCP servers (connected lazily since connect is async)
-        this._mcpConfigs = config.mcpServers ?? [];
+    /**
+     * Initialize cloud storage backend. Called lazily on first chat/stream,
+     * or can be called explicitly for eager initialization.
+     */
+    async initStorage(): Promise<void> {
+        if (this._storageInitialized) return;
+        if (this._storageInitPromise) return this._storageInitPromise;
+
+        this._storageInitPromise = (async () => {
+            try {
+                if (this._storageConfig?.backend === 'cloud') {
+                    const { createCloudBackend } = await import('./storage/cloudBackend');
+                    const storage = await createCloudBackend();
+                    this._sessionMgr = new SessionManager({
+                        store: storage.sessionStore,
+                    });
+                    if (storage.memoryStore && this._memoryEnabled) {
+                        setMemoryStore(storage.memoryStore);
+                    }
+                }
+            } catch (e: any) {
+                console.error('[AgentInstance] Cloud storage init failed:', e.message ?? e);
+            }
+            this._storageInitialized = true;
+        })();
+
+        return this._storageInitPromise;
     }
 
     /**
      * Initialize MCP server connections. Called lazily on first chat/stream,
      * or can be called explicitly for eager initialization.
+     *
+     * The harness owns the MCPManager; we still need to merge the discovered
+     * MCP tool descriptors into the LLM-facing `_openaiTools` payload here,
+     * since that's the surface the agent loop hands to the provider.
      */
     async initMCP(): Promise<void> {
-        if (this._mcpInitialized || !this._mcpConfigs.length) return;
-        if (this._mcpInitPromise) return this._mcpInitPromise;
-
-        this._mcpInitPromise = (async () => {
-            try {
-                this._mcpManager = new MCPManager();
-                await this._mcpManager.connect(this._mcpConfigs);
-
-                // Merge MCP tools into the agent's tool list
-                const mcpToolDefs = this._mcpManager.getToolDefinitions();
-                for (const mcpTool of mcpToolDefs) {
-                    this._openaiTools.push({
-                        type: 'function',
-                        function: {
-                            name: mcpTool.name,
-                            description: mcpTool.description,
-                            parameters: mcpTool.input_schema,
-                        },
-                    });
-                }
-            } catch (e: any) {
-                console.error('[AgentInstance] MCP connection failed, continuing without MCP tools:', e.message ?? e);
-                this._mcpManager = null;
+        if (!this._harness.mcpConfigs.length) return;
+        const wasConnected = this._harness.mcpManager !== null;
+        await this._harness.initMCP();
+        const mgr = this._harness.mcpManager;
+        if (mgr && !wasConnected) {
+            for (const mcpTool of mgr.getToolDefinitions()) {
+                this._openaiTools.push({
+                    type: 'function',
+                    function: {
+                        name: mcpTool.name,
+                        description: mcpTool.description,
+                        parameters: mcpTool.input_schema,
+                    },
+                });
             }
-            this._mcpInitialized = true;
-        })();
-
-        return this._mcpInitPromise;
+        }
     }
 
     // ---- Public API ----
@@ -398,6 +499,22 @@ export class AgentInstance {
         return [...this._tools];
     }
 
+    /** Get the telemetry instance (no-op by default). */
+    get telemetry(): Telemetry {
+        return this._telemetry;
+    }
+
+    /** Snapshot of agent metrics: turns, tool calls, errors, tokens, cost. */
+    getMetrics() {
+        return this._metrics.getMetrics();
+    }
+
+    /** SkillRegistry containing every registered skill (read-mostly). */
+    get skillRegistry(): SkillRegistry { return this._skillRegistry; }
+
+    /** Lifecycle manager for the active skill set (load / unload / triggers). */
+    get skillManager(): SkillLifecycleManager { return this._skillManager; }
+
     /**
      * Run an autonomous task loop.
      *
@@ -414,12 +531,15 @@ export class AgentInstance {
      * Call this when the agent is no longer needed to release resources.
      */
     async close(): Promise<void> {
-        if (this._mcpManager) {
-            await this._mcpManager.close();
-            this._mcpManager = null;
-            this._mcpInitialized = false;
-            this._mcpInitPromise = null;
-        }
+        await this._harness.close();
+    }
+
+    /**
+     * The underlying composition root. Exposed for advanced use (custom
+     * tool execution, observability, sharing telemetry across agents).
+     */
+    get harness(): AgentHarness {
+        return this._harness;
     }
 
     // ---- Session wrapper ----
@@ -493,78 +613,131 @@ export class AgentInstance {
 
     // ---- Internal agent loop ----
 
-    private async _executeTool(
-        name: string,
-        args: Record<string, any>,
-    ): Promise<string> {
-        // Route MCP tools to MCPManager
-        if (this._mcpManager?.isMCPTool(name)) {
+    /**
+     * Execute a batch of tool calls using the parallel-aware ToolExecutor.
+     * Returns observations in the **original order** of `tcs`, ready to be
+     * folded back into the conversation history.
+     */
+    private async _executeToolBatch(
+        tcs: ToolCallMsg[],
+    ): Promise<{ tool_call_id: string; content: string }[]> {
+        const requests: ToolCallRequest[] = [];
+        const failures: { tool_call_id: string; content: string }[] = [];
+        const indexById = new Map<string, number>();
+
+        // Parse arguments up-front so parse failures don't make it to the executor.
+        for (const tc of tcs) {
+            let args: Record<string, any>;
             try {
-                return await this._mcpManager.callTool(name, args);
-            } catch (e: any) {
-                return `[MCP tool error] ${name}: ${e.message ?? String(e)}`;
+                args = JSON.parse(tc.function.arguments || '{}');
+            } catch {
+                failures.push({
+                    tool_call_id: tc.id,
+                    content: `[ARG_PARSE_ERROR] Could not parse arguments for tool "${tc.function.name}". Raw: ${(tc.function.arguments || '').slice(0, 200)}`,
+                });
+                continue;
             }
+            indexById.set(tc.id, requests.length);
+            requests.push({ id: tc.id, name: tc.function.name, arguments: args });
         }
 
-        const tool = this._toolMap.get(name);
-        if (!tool) return `Unknown tool: ${name}`;
+        const results = requests.length
+            ? await this._toolExecutor.executeAll(requests, {
+                  approvalCallback: this._approvalCallback,
+                  mcpRouter: this._mcpManager,
+              })
+            : [];
 
-        // Sandbox permission check (handles file guards, command analysis, etc.)
-        const decision = this._sandbox.checkPermission(name, args);
-
-        if (decision.behavior === 'deny') {
-            return decision.message || 'Operation blocked by sandbox';
-        }
-
-        if (decision.behavior === 'ask') {
-            // If approval callback is set, delegate to it
-            if (this._approvalCallback) {
-                const approved = await this._approvalCallback(name, args);
-                if (!approved) return 'Action not approved by user.';
-            } else {
-                // No callback and sandbox says ask — deny by default
-                return decision.message || 'Operation requires confirmation but no approval callback set';
+        // Reassemble in input order.
+        const out: { tool_call_id: string; content: string }[] = [];
+        for (const tc of tcs) {
+            const failure = failures.find((f) => f.tool_call_id === tc.id);
+            if (failure) {
+                out.push(failure);
+                continue;
             }
+            const idx = indexById.get(tc.id);
+            const r = idx !== undefined ? results[idx] : undefined;
+            out.push({
+                tool_call_id: tc.id,
+                content: r ? r.output : `[Tool error] ${tc.function.name}: missing result`,
+            });
         }
-
-        // Legacy requiresApproval check (for user-defined tools)
-        if (tool.requiresApproval && this._approvalCallback && decision.behavior === 'allow') {
-            const approved = await this._approvalCallback(name, args);
-            if (!approved) return 'Action not approved by user.';
-        }
-
-        // Execute with sandbox timeout & output limits
-        return this._sandbox.wrapExecution(async () => {
-            return await tool.execute(args);
-        });
+        return out;
     }
 
     private async _buildSystemForTurn(userInput: string): Promise<string> {
         if (!this._contextEnabled) return this._systemPrompt;
 
-        let ragLines: string[] | undefined;
-        if (this._memoryEnabled) {
-            try {
-                const memories = await retrieve(userInput, 5);
-                ragLines = memories.map((m) => m[0]).filter(Boolean);
-            } catch (e: any) {
-                console.error('[AgentInstance] Memory retrieval failed, continuing without memories:', e.message ?? e);
-            }
-        }
+        const budget = getBudget();
+        // Reserve the per-turn system budget separately so RAG and project
+        // knowledge live within their own slice of the input window.
+        const systemBudget = budget.system + Math.floor(budget.rag);
 
-        return assembleSystem({
-            baseSystem: this._systemPrompt,
-            ragLines: ragLines?.length ? ragLines : undefined,
+        const builder = new ContextBuilder({
+            baseSystemPrompt: this._systemPrompt,
+            includeProjectKnowledge: true,
+            includeMemory: this._memoryEnabled,
+            activeSkills: this._skillManager.getActiveSkillBodies(),
+            telemetry: this._telemetry,
         });
+
+        try {
+            const result = await builder.build(userInput, systemBudget);
+            this._telemetry.debug('context', 'system assembled', {
+                tokensUsed: result.tokensUsed,
+                included: result.included,
+                truncated: result.truncated,
+                dropped: result.dropped,
+            });
+            return result.text || this._systemPrompt;
+        } catch (e: any) {
+            this._telemetry.warn('context', 'context assembly failed; falling back to base system prompt', { error: e?.message ?? String(e) });
+            return this._systemPrompt;
+        }
     }
 
     private async _runLoop(
         userInput: string,
         history: Record<string, any>[],
     ): Promise<ChatResult> {
+        return this._telemetry.withSpan('agent.turn', async (turnSpan) => {
+            const turnStart = Date.now();
+            const result = await this._runLoopInner(userInput, history, turnSpan);
+            this._metrics.recordTurn({
+                turnNumber: this._metrics.getMetrics().turnCount + 1,
+                hadToolCalls: result.hadToolCalls,
+                toolCallCount: 0,
+                inputTokens: result.usage?.inputTokens ?? 0,
+                outputTokens: result.usage?.outputTokens ?? 0,
+                durationMs: Date.now() - turnStart,
+                estimatedCost: result.estimatedCost,
+                timestamp: Date.now(),
+            });
+            turnSpan.setAttributes({
+                'agent.turn.input_tokens': result.usage?.inputTokens ?? 0,
+                'agent.turn.output_tokens': result.usage?.outputTokens ?? 0,
+                'agent.turn.had_tool_calls': result.hadToolCalls,
+            });
+            return result;
+        });
+    }
+
+    private async _runLoopInner(
+        userInput: string,
+        history: Record<string, any>[],
+        _turnSpan: import('./telemetry').Span,
+    ): Promise<ChatResult> {
+        await this.initStorage();
         await this.initMCP();
-        const sanitized = sanitizeUserInput(userInput);
-        const message = sanitized.text;
+        const sanitized = await this._guards.runInput(userInput);
+        if (sanitized.annotations.length) {
+            this._telemetry.debug('guardrails', 'input annotated', { annotations: sanitized.annotations });
+        }
+        const message = sanitized.value;
+        // Auto-load any skills whose triggers fire on this message; the
+        // freshly-loaded bodies will appear in the system prompt below.
+        await this._skillManager.autoLoadFromTriggers(message);
         const system = await this._buildSystemForTurn(message);
 
         // Trim history if context management enabled
@@ -586,6 +759,7 @@ export class AgentInstance {
 
         let toolRounds = 0;
         let hadToolCalls = false;
+        let accumulatedUsage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
 
         while (true) {
             // #1: LLM call with retry
@@ -597,7 +771,12 @@ export class AgentInstance {
                 workingHistory.push({ role: 'assistant', content: errMsg });
                 history.length = 0;
                 history.push(...workingHistory);
-                return { reply: errMsg, history: workingHistory, hadToolCalls };
+                return { reply: errMsg, history: workingHistory, hadToolCalls, usage: accumulatedUsage };
+            }
+
+            // Accumulate token usage
+            if (response.usage && Object.keys(response.usage).length > 0) {
+                accumulatedUsage = mergeTokenUsage(accumulatedUsage, toTokenUsage(response.usage));
             }
 
             const tcs = response.toolCalls?.length
@@ -612,15 +791,23 @@ export class AgentInstance {
                 workingHistory.push(assistantMsg);
                 // #8: memory consolidation failure handling
                 if (this._memoryEnabled) {
+                    const cspan = this._telemetry.startSpan('memory.consolidate');
                     try { await consolidateTurn(message, content.trim()); }
-                    catch (e: any) { console.error('[AgentInstance] consolidateTurn failed:', e.message ?? e); }
+                    catch (e: any) {
+                        cspan.setStatus('error', e?.message ?? String(e));
+                        console.error('[AgentInstance] consolidateTurn failed:', e.message ?? e);
+                    }
+                    finally { cspan.end(); }
                 }
                 history.length = 0;
                 history.push(...workingHistory);
+                const model = response.model ?? '';
                 return {
                     reply: content.trim(),
                     history: workingHistory,
                     hadToolCalls,
+                    usage: accumulatedUsage,
+                    estimatedCost: estimateCost(accumulatedUsage, model),
                 };
             }
 
@@ -632,34 +819,17 @@ export class AgentInstance {
                 workingHistory.push({ role: 'assistant', content: msg });
                 history.length = 0;
                 history.push(...workingHistory);
-                return { reply: msg, history: workingHistory, hadToolCalls };
+                return { reply: msg, history: workingHistory, hadToolCalls, usage: accumulatedUsage };
             }
 
-            // Execute tools
-            const results: { tool_call_id: string; content: string }[] = [];
-            for (const tc of tcs) {
-                let args: Record<string, any>;
-                try {
-                    args = JSON.parse(tc.function.arguments || '{}');
-                } catch {
-                    // #15: inform LLM about parse failure instead of silent {}
-                    results.push({
-                        tool_call_id: tc.id,
-                        content: `[Argument parse error] Could not parse arguments for tool "${tc.function.name}". Raw: ${(tc.function.arguments || '').slice(0, 200)}`,
-                    });
-                    continue;
+            // Execute tools (parallel-safe ones in parallel via ToolExecutor)
+            const results = await this._executeToolBatch(tcs);
+            for (const r of results) {
+                const guarded = await this._guards.runObservation(r.content);
+                if (guarded.annotations.length) {
+                    this._telemetry.debug('guardrails', 'observation annotated', { annotations: guarded.annotations });
                 }
-                // #4: tool execution try-catch
-                let output: string;
-                try {
-                    output = await this._executeTool(tc.function.name, args);
-                } catch (e: any) {
-                    output = `[Tool error] ${tc.function.name}: ${e.message ?? String(e)}`;
-                }
-                if (this._contextEnabled) {
-                    output = foldObservation(output);
-                }
-                results.push({ tool_call_id: tc.id, content: output });
+                r.content = this._contextEnabled ? foldObservation(guarded.value) : guarded.value;
             }
 
             // Append to conversation (preserve thinking if present)
@@ -691,9 +861,14 @@ export class AgentInstance {
         history: Record<string, any>[],
         onComplete?: (result: ChatResult) => void,
     ): AsyncGenerator<StreamChunk> {
+        await this.initStorage();
         await this.initMCP();
-        const sanitized = sanitizeUserInput(userInput);
-        const message = sanitized.text;
+        const sanitized = await this._guards.runInput(userInput);
+        if (sanitized.annotations.length) {
+            this._telemetry.debug('guardrails', 'input annotated', { annotations: sanitized.annotations });
+        }
+        const message = sanitized.value;
+        await this._skillManager.autoLoadFromTriggers(message);
         const system = await this._buildSystemForTurn(message);
 
         let workingHistory = [...history];
@@ -757,8 +932,13 @@ export class AgentInstance {
                 if (thinking) assistantMsg.thinking = thinking;
                 workingHistory.push(assistantMsg);
                 if (this._memoryEnabled) {
+                    const cspan = this._telemetry.startSpan('memory.consolidate');
                     try { await consolidateTurn(message, content.trim()); }
-                    catch (e: any) { console.error('[AgentInstance] consolidateTurn failed:', e.message ?? e); }
+                    catch (e: any) {
+                        cspan.setStatus('error', e?.message ?? String(e));
+                        console.error('[AgentInstance] consolidateTurn failed:', e.message ?? e);
+                    }
+                    finally { cspan.end(); }
                 }
                 history.length = 0;
                 history.push(...workingHistory);
@@ -786,27 +966,14 @@ export class AgentInstance {
                 return;
             }
 
-            // Execute tools (non-streaming phase)
-            const results: { tool_call_id: string; content: string }[] = [];
-            for (const tc of tcs) {
-                let args: Record<string, any>;
-                try {
-                    args = JSON.parse(tc.function.arguments || '{}');
-                } catch {
-                    results.push({
-                        tool_call_id: tc.id,
-                        content: `[Argument parse error] Could not parse arguments for tool "${tc.function.name}". Raw: ${(tc.function.arguments || '').slice(0, 200)}`,
-                    });
-                    continue;
+            // Execute tools (non-streaming phase, parallel-safe ones in parallel)
+            const results = await this._executeToolBatch(tcs);
+            for (const r of results) {
+                const guarded = await this._guards.runObservation(r.content);
+                if (guarded.annotations.length) {
+                    this._telemetry.debug('guardrails', 'observation annotated', { annotations: guarded.annotations });
                 }
-                let output: string;
-                try {
-                    output = await this._executeTool(tc.function.name, args);
-                } catch (e: any) {
-                    output = `[Tool error] ${tc.function.name}: ${e.message ?? String(e)}`;
-                }
-                if (this._contextEnabled) output = foldObservation(output);
-                results.push({ tool_call_id: tc.id, content: output });
+                r.content = this._contextEnabled ? foldObservation(guarded.value) : guarded.value;
             }
 
             const assistantToolMsg: Record<string, any> = {
@@ -839,15 +1006,49 @@ export class AgentInstance {
         maxRetries: number = 3,
     ): Promise<LLMResponse | AsyncGenerator<LLMResponse>> {
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            const span = this._telemetry.startSpan('llm.chat', {
+                attributes: {
+                    'gen_ai.operation.name': 'chat',
+                    'llm.attempt': attempt,
+                    'llm.stream': stream,
+                    'llm.message_count': apiMessages.length,
+                },
+            });
+            const startedAt = Date.now();
             try {
-                return this._llm.chat(apiMessages, {
+                const result = this._llm.chat(apiMessages, {
                     tools: this._openaiTools,
                     maxTokens: 8000,
                     stream,
                 });
+                // For non-streaming we can record usage once the promise settles.
+                if (!stream) {
+                    const resp = await (result as Promise<LLMResponse>);
+                    if (resp.usage) {
+                        this.telemetry.recordChat(
+                            span,
+                            resp.model ?? '',
+                            {
+                                input: (resp.usage as any).input_tokens ?? (resp.usage as any).inputTokens,
+                                output: (resp.usage as any).output_tokens ?? (resp.usage as any).outputTokens,
+                            },
+                            Date.now() - startedAt,
+                        );
+                    }
+                    span.end();
+                    return resp;
+                }
+                // Streaming: end span when generator is exhausted (best-effort).
+                span.setAttribute('llm.duration_ms_initiated', Date.now() - startedAt);
+                span.end();
+                return result as AsyncGenerator<LLMResponse>;
             } catch (e: any) {
                 const status = e?.status ?? e?.response?.status;
                 const retryable = [429, 500, 502, 503].includes(status);
+                span.setStatus('error', e?.message ?? String(e));
+                span.setAttribute('error.code', String(status ?? 'unknown'));
+                span.end();
+                this._metrics.recordError(`LLM_${status ?? 'ERROR'}`);
                 if (attempt < maxRetries && retryable) {
                     await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt - 1)));
                     continue;

@@ -4,7 +4,7 @@
 
 import * as dotenv from 'dotenv';
 import * as path from 'path';
-import { OpenAIProvider } from './llmProtocol';
+import { OpenAIProvider } from './providers/openai';
 
 dotenv.config({ override: true });
 

@@ -1,12 +1,12 @@
 /**
- * index.ts — Public barrel export for the agentic-system library.
+ * index.ts — Public barrel export for the borderless-agent library.
  *
  * Usage:
  * ```ts
- * import { AgentBuilder, createFileStorage } from 'agentic-system';
+ * import { AgentBuilder } from 'borderless-agent';
  *
  * const agent = new AgentBuilder()
- *   .setLLM({ apiKey: 'sk-...' })
+ *   .setProvider('openai', { apiKey: 'sk-...' })
  *   .setSystemPrompt('You are helpful.')
  *   .addTool({ name: 'hello', description: 'Say hi', execute: () => 'Hi!' })
  *   .build();
@@ -35,9 +35,36 @@ export type {
     AutonomousPhase,
 } from './types';
 
-// ---- LLM provider (for advanced users who want to supply their own) ----
-export { OpenAIProvider } from './llmProtocol';
+// ---- LLM providers ----
+export { OpenAIProvider } from './providers/openai';
+export { AnthropicProvider } from './providers/anthropic';
+export { GoogleProvider } from './providers/google';
 export type { LLMProvider, LLMResponse, ToolCall, ChatMessage } from './llmProtocol';
+export type { ProviderName, RetryOptions } from './providers/base';
+export { getContextWindowForModel, withRetry } from './providers/base';
+
+// ---- Embeddings (optional) ----
+export { OpenAIEmbeddingProvider, cosineSimilarity } from './providers/embeddings';
+export type { EmbeddingProvider } from './providers/embeddings';
+export {
+    setEmbeddingProvider,
+    getEmbeddingProvider,
+    retrieve as retrieveMemories,
+    writeEvent as writeMemoryEvent,
+    writeInsight as writeMemoryInsight,
+} from './memoryCore';
+export type { RetrievalConfig } from './memoryCore';
+
+// ---- Pricing & Token Usage ----
+export {
+    type TokenUsage,
+    type ModelPricing,
+    getModelPricing,
+    setModelPricing,
+    estimateCost,
+    toTokenUsage,
+    mergeTokenUsage,
+} from './pricing';
 
 // ---- Storage helpers ----
 export { createFileBackend as createFileStorage } from './storage/fileBackend';
@@ -51,6 +78,77 @@ export type { MCPServerConfig } from './mcpClient';
 
 // ---- Session manager (for direct access) ----
 export { SessionManager, Session } from './sessionCore';
+
+// ---- Telemetry & metrics ----
+export { Telemetry, ConsoleExporter, MemoryExporter } from './telemetry';
+export type {
+    Span,
+    SpanData,
+    SpanStatus,
+    LogEntry,
+    LogLevel,
+    TelemetryExporter,
+    TelemetryConfig,
+} from './telemetry';
+export { MetricsCollector } from './metrics';
+export type {
+    TurnMetrics,
+    ToolMetrics,
+    AgentMetricsSnapshot,
+} from './metrics';
+
+// ---- Context assembly ----
+export { ContextBuilder, SourceRegistry } from './contextBuilder';
+export type {
+    ContextSource,
+    SourceCategory,
+    AssembleResult,
+    ContextBuilderOptions,
+    BuildContextResult,
+} from './contextBuilder';
+
+// ---- Composition root ----
+export { AgentHarness, ToolRegistry } from './harness';
+export type { HarnessConfig } from './harness';
+
+// ---- Guardrails ----
+export {
+    GuardPipeline,
+    injectionDetectionGuard,
+    piiRedactionGuard,
+    DEFAULT_PII_PATTERNS,
+} from './guardrails';
+export type { Guard, GuardContext, GuardResult, GuardOutcome, GuardPipelineOptions } from './guardrails';
+
+// ---- Skills (registry + lifecycle) ----
+export { SkillRegistry } from './skillRegistry';
+export { SkillLifecycleManager } from './skillLifecycle';
+export type { SkillContext } from './types';
+export type { SkillLoadResult, SkillLifecycleManagerOptions } from './skillLifecycle';
+
+// ---- Tool execution ----
+export { ToolExecutor } from './toolExecutor';
+export type {
+    ToolCallRequest,
+    ToolCallResult,
+    ExecutionPlan,
+    ToolExecutorContext,
+    ToolExecutorOptions,
+} from './toolExecutor';
+
+// ---- Errors ----
+export {
+    AgentError,
+    LLMError,
+    RateLimitError,
+    AuthenticationError,
+    ContextOverflowError,
+    ToolError,
+    ToolTimeoutError,
+    ToolExecutionError,
+    ValidationError,
+    ConfigurationError,
+} from './errors';
 
 // ---- Context helpers (for advanced usage) ----
 export {

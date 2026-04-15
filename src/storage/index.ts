@@ -17,13 +17,13 @@ import { createFileBackend } from './fileBackend';
 
 let _defaultBackend: StorageBackend | null = null;
 
-export function getStorageBackend(options?: {
+export async function getStorageBackend(options?: {
     backend?: string;
     sessionDir?: string;
     memoryFile?: string;
     skillsDir?: string;
     contextDir?: string;
-}): StorageBackend {
+}): Promise<StorageBackend> {
     const choice = (
         options?.backend ??
         process.env.AGENT_STORAGE_BACKEND ??
@@ -33,9 +33,8 @@ export function getStorageBackend(options?: {
         .toLowerCase();
 
     if (choice === 'cloud') {
-        // Dynamic import to avoid requiring @aws-sdk when using file backend
-        const { createCloudBackend } = require('./cloudBackend');
-        _defaultBackend = createCloudBackend();
+        const { createCloudBackend } = await import('./cloudBackend');
+        _defaultBackend = await createCloudBackend();
     } else {
         _defaultBackend = createFileBackend({
             sessionDir: options?.sessionDir,
@@ -47,25 +46,25 @@ export function getStorageBackend(options?: {
     return _defaultBackend!;
 }
 
-function ensureBackend(): StorageBackend {
-    if (!_defaultBackend) getStorageBackend();
+async function ensureBackend(): Promise<StorageBackend> {
+    if (!_defaultBackend) await getStorageBackend();
     return _defaultBackend!;
 }
 
-export function getDefaultSessionStore(): SessionStore {
-    return ensureBackend().sessionStore;
+export async function getDefaultSessionStore(): Promise<SessionStore> {
+    return (await ensureBackend()).sessionStore;
 }
 
-export function getDefaultMemoryStore(): MemoryStore {
-    return ensureBackend().memoryStore;
+export async function getDefaultMemoryStore(): Promise<MemoryStore> {
+    return (await ensureBackend()).memoryStore;
 }
 
-export function getDefaultSkillStore(): SkillStore {
-    return ensureBackend().skillStore;
+export async function getDefaultSkillStore(): Promise<SkillStore> {
+    return (await ensureBackend()).skillStore;
 }
 
-export function getDefaultContextStore(): ContextStore {
-    return ensureBackend().contextStore;
+export async function getDefaultContextStore(): Promise<ContextStore> {
+    return (await ensureBackend()).contextStore;
 }
 
 export {
