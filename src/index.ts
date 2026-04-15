@@ -111,6 +111,15 @@ export type {
 export { AgentHarness, ToolRegistry } from './harness';
 export type { HarnessConfig } from './harness';
 
+// ---- Guardrails ----
+export {
+    GuardPipeline,
+    injectionDetectionGuard,
+    piiRedactionGuard,
+    DEFAULT_PII_PATTERNS,
+} from './guardrails';
+export type { Guard, GuardContext, GuardResult, GuardOutcome, GuardPipelineOptions } from './guardrails';
+
 // ---- Skills (registry + lifecycle) ----
 export { SkillRegistry } from './skillRegistry';
 export { SkillLifecycleManager } from './skillLifecycle';

@@ -199,6 +199,14 @@ export interface AgentConfig {
      * and pass in to enable spans, logs, and GenAI semantic attributes.
      */
     telemetry?: import('./telemetry').Telemetry;
+    /**
+     * Optional guard pipeline. When omitted a default pipeline is built
+     * with built-in injection-detection + credential-redaction guards.
+     * Pass `new GuardPipeline({ input: [...], observation: [...] })` to
+     * customise — for example to add a regulator-specific PII pattern or
+     * a content-moderation upstream call.
+     */
+    guards?: import('./guardrails').GuardPipeline;
 }
 
 // ---------------------------------------------------------------------------

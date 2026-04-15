@@ -33,6 +33,7 @@ import { MetricsCollector } from './metrics';
 import { AgentHarness } from './harness';
 import { SkillRegistry } from './skillRegistry';
 import { SkillLifecycleManager } from './skillLifecycle';
+import { GuardPipeline } from './guardrails';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -295,6 +296,7 @@ export class AgentInstance {
     private _harness!: AgentHarness;
     private _skillRegistry!: SkillRegistry;
     private _skillManager!: SkillLifecycleManager;
+    private _guards!: GuardPipeline;
 
     // Convenience accessors that delegate to the harness. Kept private so
     // callers either go through the public API or grab the harness directly.
@@ -311,6 +313,7 @@ export class AgentInstance {
         this._llm = config.llm!;
         this._maxToolRounds = config.maxToolRounds ?? 20;
         this._memoryEnabled = config.enableMemory ?? false;
+        this._guards = config.guards ?? GuardPipeline.defaults();
         this._streamingEnabled = config.enableStreaming ?? false;
         this._contextEnabled = config.enableContext ?? true;
         this._approvalCallback = config.approvalCallback;
@@ -727,8 +730,11 @@ export class AgentInstance {
     ): Promise<ChatResult> {
         await this.initStorage();
         await this.initMCP();
-        const sanitized = sanitizeUserInput(userInput);
-        const message = sanitized.text;
+        const sanitized = await this._guards.runInput(userInput);
+        if (sanitized.annotations.length) {
+            this._telemetry.debug('guardrails', 'input annotated', { annotations: sanitized.annotations });
+        }
+        const message = sanitized.value;
         // Auto-load any skills whose triggers fire on this message; the
         // freshly-loaded bodies will appear in the system prompt below.
         await this._skillManager.autoLoadFromTriggers(message);
@@ -818,8 +824,12 @@ export class AgentInstance {
 
             // Execute tools (parallel-safe ones in parallel via ToolExecutor)
             const results = await this._executeToolBatch(tcs);
-            if (this._contextEnabled) {
-                for (const r of results) r.content = foldObservation(r.content);
+            for (const r of results) {
+                const guarded = await this._guards.runObservation(r.content);
+                if (guarded.annotations.length) {
+                    this._telemetry.debug('guardrails', 'observation annotated', { annotations: guarded.annotations });
+                }
+                r.content = this._contextEnabled ? foldObservation(guarded.value) : guarded.value;
             }
 
             // Append to conversation (preserve thinking if present)
@@ -853,8 +863,11 @@ export class AgentInstance {
     ): AsyncGenerator<StreamChunk> {
         await this.initStorage();
         await this.initMCP();
-        const sanitized = sanitizeUserInput(userInput);
-        const message = sanitized.text;
+        const sanitized = await this._guards.runInput(userInput);
+        if (sanitized.annotations.length) {
+            this._telemetry.debug('guardrails', 'input annotated', { annotations: sanitized.annotations });
+        }
+        const message = sanitized.value;
         await this._skillManager.autoLoadFromTriggers(message);
         const system = await this._buildSystemForTurn(message);
 
@@ -955,8 +968,12 @@ export class AgentInstance {
 
             // Execute tools (non-streaming phase, parallel-safe ones in parallel)
             const results = await this._executeToolBatch(tcs);
-            if (this._contextEnabled) {
-                for (const r of results) r.content = foldObservation(r.content);
+            for (const r of results) {
+                const guarded = await this._guards.runObservation(r.content);
+                if (guarded.annotations.length) {
+                    this._telemetry.debug('guardrails', 'observation annotated', { annotations: guarded.annotations });
+                }
+                r.content = this._contextEnabled ? foldObservation(guarded.value) : guarded.value;
             }
 
             const assistantToolMsg: Record<string, any> = {
